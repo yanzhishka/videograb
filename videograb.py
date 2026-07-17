@@ -6,6 +6,8 @@ Run:  python3 videograb.py  →  open http://localhost:8742
 import base64
 import collections
 import html
+import http.cookiejar
+import ipaddress
 import json
 import mimetypes
 import os
@@ -23,6 +25,7 @@ import urllib.request
 import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from html.parser import HTMLParser
 from pathlib import Path
 
 PORT = 8742
@@ -46,6 +49,26 @@ YUMMY_PLAYERS = {"CVH", "Aksor", "Sibnet", "Kodik"}
 YUMMY_PLAYER_PRIORITY = {"CVH": 0, "Aksor": 1, "Sibnet": 2, "Kodik": 3}
 KODIK_HOSTS = {"kodikplayer.com", "kodik.info", "kodik.cc", "aniqit.com"}
 YUMMY_CACHE = {}
+EMBED_CACHE = {}
+EMBED_CACHE_TTL = 1800
+GENERIC_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+)
+MEDIA_SUFFIXES = {".m3u8", ".mpd", ".mp4", ".m4v", ".webm", ".mov", ".mkv"}
+ANTIBOT_MARKERS = (
+    "captcha",
+    "request has been denied",
+    "checking your browser",
+    "just a moment...",
+    "enable javascript and cookies to continue",
+    "cf-chl-",
+    "challenge-platform",
+    "g-recaptcha",
+    "hcaptcha",
+    "\u0435\u0441\u043b\u0438 \u0432\u044b \u0447\u0435\u043b\u043e\u0432\u0435\u043a",
+    "\u043f\u043e\u0445\u043e\u0436\u0443\u044e \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0443",
+)
 YUMMY_PLAYER_LABEL = "\u041f\u043b\u0435\u0435\u0440"
 YUMMY_SUBTITLES_LABEL = "\u0421\u0443\u0431\u0442\u0438\u0442\u0440\u044b"
 YUMMY_VOICE_LABEL = "\u041e\u0437\u0432\u0443\u0447\u043a\u0430"
@@ -57,6 +80,35 @@ NUXT_DATA = re.compile(
 
 class SourceError(Exception):
     """An error message that is safe to show to the user."""
+
+
+class _EmbeddedMediaParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.candidates = []
+        self.base_href = None
+
+    def handle_starttag(self, tag, attrs):
+        values = {str(key).lower(): value for key, value in attrs if value is not None}
+        tag = tag.lower()
+        if tag == "base" and values.get("href"):
+            self.base_href = values["href"]
+        elif tag in {"video", "audio", "source"}:
+            for name in ("src", "data-src", "data-file"):
+                if values.get(name):
+                    self.candidates.append((values[name], "direct"))
+        elif tag in {"iframe", "embed", "object"}:
+            for name in ("src", "data", "data-src", "data-lazy-src"):
+                if values.get(name):
+                    self.candidates.append((values[name], "iframe"))
+        elif tag == "meta":
+            name = (values.get("property") or values.get("name") or "").lower()
+            if name in {"og:video", "og:video:url", "og:video:secure_url",
+                        "twitter:player", "twitter:player:stream"} and values.get("content"):
+                self.candidates.append((values["content"], "player"))
+        for name in ("data-video", "data-player", "data-iframe", "data-file"):
+            if values.get(name):
+                self.candidates.append((values[name], "player"))
 
 
 def _anilibria_episode_id(url):
@@ -457,6 +509,245 @@ def _safe_filename(title):
 def _safe_title(title):
     # Do not allow path separators or yt-dlp templates in the file name.
     return _safe_filename(title).replace("%", "%%")
+
+
+def _public_http_url(url):
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        hostname = parsed.hostname or ""
+        if parsed.scheme not in {"http", "https"} or not hostname:
+            return False
+        if hostname.lower() == "localhost" or hostname.lower().endswith(".local"):
+            return False
+        try:
+            return ipaddress.ip_address(hostname).is_global
+        except ValueError:
+            return True
+    except ValueError:
+        return False
+
+
+def _unescape_media_text(value):
+    value = str(value or "")
+    replacements = (
+        ("\\/", "/"), ("\\u002F", "/"), ("\\u002f", "/"),
+        ("\\u003A", ":"), ("\\u003a", ":"), ("\\u003F", "?"),
+        ("\\u003f", "?"), ("\\u003D", "="), ("\\u003d", "="),
+        ("\\u0026", "&"), ("\\x26", "&"), ("\\&", "&"),
+    )
+    for _ in range(2):
+        for escaped, plain in replacements:
+            value = value.replace(escaped, plain)
+    if value.casefold().startswith(("http%3a%2f%2f", "https%3a%2f%2f")):
+        value = urllib.parse.unquote(value)
+    return value
+
+
+def _normalize_embedded_url(page_url, value, base_url=None):
+    value = html.unescape(str(value or "")).strip().strip("\"'()")
+    value = _unescape_media_text(value)
+    if not value or value.startswith(("javascript:", "data:", "blob:", "#")):
+        return None
+    try:
+        target = urllib.parse.urljoin(base_url or page_url, value)
+        if not _public_http_url(target):
+            return None
+        original = urllib.parse.urldefrag(page_url)[0].rstrip("/")
+        if urllib.parse.urldefrag(target)[0].rstrip("/") == original:
+            return None
+        return target
+    except ValueError:
+        return None
+
+
+def _embedded_candidates(page_url, page):
+    parser = _EmbeddedMediaParser()
+    try:
+        parser.feed(page)
+    except Exception:
+        pass
+
+    expanded = _unescape_media_text(page)
+    media_pattern = (
+        r"((?:(?:https?:)?//|/)[^\"'<>\\\s]+?\."
+        r"(?:m3u8|mpd|mp4|m4v|webm|mov|mkv)(?:\?[^\"'<>\\\s]*)?)"
+    )
+    parser.candidates.extend((value, "direct") for value in re.findall(
+        media_pattern, expanded, re.IGNORECASE
+    ))
+    config_pattern = (
+        r"\b(?:file|hls|dash|manifest|video_?url)\b\s*[:=]\s*[\"']([^\"']+)[\"']"
+    )
+    parser.candidates.extend((value, "player") for value in re.findall(
+        config_pattern, expanded, re.IGNORECASE
+    ))
+
+    unique = []
+    seen = set()
+    priority = {"direct": 0, "player": 1, "iframe": 2}
+    base_url = urllib.parse.urljoin(page_url, parser.base_href) if parser.base_href else page_url
+    for index, (value, kind) in enumerate(parser.candidates):
+        target = _normalize_embedded_url(page_url, value, base_url)
+        if not target or target in seen:
+            continue
+        suffix = Path(urllib.parse.urlsplit(target).path).suffix.lower()
+        if suffix in MEDIA_SUFFIXES:
+            kind = "direct"
+        if kind == "player" and suffix in {
+            ".js", ".css", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp"
+        }:
+            continue
+        seen.add(target)
+        unique.append((priority.get(kind, 3), index, {"url": target, "kind": kind}))
+    unique.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in unique[:12]]
+
+
+def _page_title(page):
+    match = re.search(r"<title\b[^>]*>(.*?)</title>", page, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    return html.unescape(re.sub(r"\s+", " ", match.group(1))).strip()
+
+
+def _looks_like_antibot(page):
+    lowered = page.casefold()
+    return any(marker in lowered for marker in ANTIBOT_MARKERS)
+
+
+def _fetch_embedded_page(url, referer=None, timeout=20, opener=None):
+    headers = {
+        "User-Agent": GENERIC_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    if referer:
+        headers["Referer"] = referer
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        open_url = opener.open if opener else urllib.request.urlopen
+        with open_url(request, timeout=timeout) as response:
+            raw = response.read(4 * 1024 * 1024 + 1)[:4 * 1024 * 1024]
+            charset = "utf-8"
+            if hasattr(response.headers, "get_content_charset"):
+                charset = response.headers.get_content_charset() or "utf-8"
+            final_url = response.geturl()
+    except urllib.error.HTTPError as exc:
+        body = exc.read(1024 * 1024).decode("utf-8", errors="replace")
+        if _looks_like_antibot(body):
+            raise SourceError(
+                "The site blocked automated access with an anti-bot or CAPTCHA check. "
+                "VideoGrab does not bypass these checks"
+            ) from exc
+        raise SourceError(
+            f"Could not open the page while looking for a player: HTTP {exc.code}"
+        ) from exc
+    except Exception as exc:
+        raise SourceError(f"Could not open the page while looking for a player: {exc}") from exc
+    return raw.decode(charset, errors="replace"), final_url
+
+
+def _ytdlp_error(run):
+    lines = [line.strip() for line in (run.stderr or "").splitlines() if line.strip()]
+    error = next((line for line in reversed(lines) if line.startswith("ERROR:")), None)
+    return (error or (lines[-1] if lines else "yt-dlp could not read the video")).removeprefix("ERROR: ")
+
+
+def _run_ytdlp_info(url, referer=None, timeout=45):
+    cmd = ["yt-dlp", "-J", "--no-playlist"]
+    if referer:
+        cmd += ["--referer", referer, "--user-agent", GENERIC_USER_AGENT]
+    cmd.append(url)
+    try:
+        run = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, "the site did not respond before the player search timed out"
+    if run.returncode != 0:
+        return None, _ytdlp_error(run)
+    try:
+        info = json.loads(run.stdout)
+    except json.JSONDecodeError:
+        return None, "yt-dlp returned unreadable video information"
+    if not isinstance(info, dict):
+        return None, "yt-dlp did not return a single video"
+    return info, None
+
+
+def _embedded_cache_get(url):
+    cached = EMBED_CACHE.get(url)
+    if not cached:
+        return None
+    if time.monotonic() - cached[0] >= EMBED_CACHE_TTL:
+        EMBED_CACHE.pop(url, None)
+        return None
+    return cached[1]
+
+
+def _embedded_cache_put(url, result):
+    EMBED_CACHE[url] = (time.monotonic(), result)
+    if len(EMBED_CACHE) > 32:
+        oldest = min(EMBED_CACHE, key=lambda key: EMBED_CACHE[key][0])
+        EMBED_CACHE.pop(oldest, None)
+
+
+def _discover_embedded_video(url, original_error, deadline=None, visited=None,
+                             root_title=None, depth=0, referer=None, opener=None):
+    deadline = deadline or time.monotonic() + 50
+    visited = visited if visited is not None else set()
+    if opener is None:
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+        )
+    remaining = deadline - time.monotonic()
+    if depth > 2 or remaining < 2:
+        raise SourceError("The embedded player search timed out")
+    page, page_url = _fetch_embedded_page(
+        url, referer, min(20, max(2, remaining)), opener
+    )
+    if page_url in visited:
+        raise SourceError("The page contains a loop of embedded players")
+    visited.add(page_url)
+
+    title = root_title or _page_title(page)
+    candidates = _embedded_candidates(page_url, page)
+    if not candidates and _looks_like_antibot(page):
+        raise SourceError(
+            "The site blocked automated access with an anti-bot or CAPTCHA check. "
+            "VideoGrab does not bypass these checks"
+        )
+    if not candidates:
+        raise SourceError(original_error)
+
+    errors = []
+    for candidate in candidates[:8]:
+        remaining = deadline - time.monotonic()
+        if remaining < 2:
+            break
+        info, error = _run_ytdlp_info(
+            candidate["url"], page_url, min(18, max(2, remaining))
+        )
+        if info:
+            return {
+                "url": candidate["url"],
+                "referer": page_url,
+                "title": title or info.get("title") or "Embedded video",
+                "info": info,
+            }
+        if error:
+            errors.append(error)
+        if candidate["kind"] != "direct" and depth < 2:
+            try:
+                return _discover_embedded_video(
+                    candidate["url"], original_error, deadline, visited,
+                    title, depth + 1, page_url, opener,
+                )
+            except SourceError as exc:
+                errors.append(str(exc))
+    if errors:
+        raise SourceError(
+            "Embedded players were found, but none exposed a public downloadable stream. "
+            + errors[0]
+        )
+    raise SourceError("The embedded player search timed out")
 
 
 def _telegram_target(url):
@@ -1253,25 +1544,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"title": yummy["title"], "heights": [],
                                  "max_abr": None, "yummy_sources": sources})
                 return
-            try:
-                run = subprocess.run(["yt-dlp", "-J", "--no-playlist", u],
-                                     capture_output=True, text=True, timeout=60)
-            except subprocess.TimeoutExpired:
-                self._json(422, {"error": "the site did not respond within one minute"})
-                return
-            if run.returncode != 0:
-                lines = [l for l in run.stderr.strip().splitlines() if l]
-                msg = (lines[-1] if lines else "could not read the video").removeprefix("ERROR: ")
-                self._json(422, {"error": msg})
-                return
-            info = json.loads(run.stdout)
+            embedded = _embedded_cache_get(u)
+            info = embedded["info"] if embedded else None
+            if not info:
+                info, error = _run_ytdlp_info(u)
+                if not info:
+                    try:
+                        embedded = _discover_embedded_video(u, error)
+                        _embedded_cache_put(u, embedded)
+                        info = embedded["info"]
+                    except SourceError as exc:
+                        self._json(422, {"error": str(exc)})
+                        return
             fmts = info.get("formats", [])
             heights = sorted({f["height"] for f in fmts
                               if f.get("height") and f.get("vcodec") not in (None, "none")},
                              reverse=True)
             abrs = [f["abr"] for f in fmts
                     if f.get("abr") and f.get("acodec") not in (None, "none")]
-            self._json(200, {"title": info.get("title", ""), "heights": heights[:6],
+            title = embedded["title"] if embedded else info.get("title", "")
+            self._json(200, {"title": title, "heights": heights[:6],
                              "max_abr": round(max(abrs)) if abrs else None})
         elif path == "/cancel":
             job = JOBS.pop(urllib.parse.parse_qs(query).get("id", [""])[0], None)
@@ -1323,6 +1615,7 @@ class Handler(BaseHTTPRequestHandler):
         except SourceError as exc:
             self._json(422, {"error": str(exc)})
             return
+        embedded = None if telegram or anilibria or yummy else _embedded_cache_get(url)
 
         tmp = tempfile.TemporaryDirectory()
         if telegram and data.get("mode") != "audio":
@@ -1362,6 +1655,9 @@ class Handler(BaseHTTPRequestHandler):
         elif yummy_source:
             source_url = yummy_source["url"]
             out = str(Path(tmp.name) / (_safe_title(yummy_source["title"]) + ".%(ext)s"))
+        elif embedded:
+            source_url = embedded["url"]
+            out = str(Path(tmp.name) / (_safe_title(embedded["title"]) + ".%(ext)s"))
         else:
             source_url = _pick_anilibria_source(anilibria["sources"], h) if anilibria else url
             out = (str(Path(tmp.name) / (_safe_title(anilibria["title"]) + ".%(ext)s"))
@@ -1387,17 +1683,20 @@ class Handler(BaseHTTPRequestHandler):
             elif ffmpeg:
                 # Quality is the real height from /probe, or a fallback value.
                 fmt = f"bv*[height<={h}]+ba/b[height<={h}]/b" if h else "bv*+ba/b"
-                cmd = ["yt-dlp", "--no-playlist", "-f", fmt, "-o", out, url,
+                cmd = ["yt-dlp", "--no-playlist", "-f", fmt, "-o", out, source_url,
                        "--merge-output-format", "mp4"]
             else:
                 # Without ffmpeg, yt-dlp cannot merge video and audio; use the best ready-made file.
                 fmt = f"b[height<={h}]/b" if h else "b"
-                cmd = ["yt-dlp", "--no-playlist", "-f", fmt, "-o", out, url]
+                cmd = ["yt-dlp", "--no-playlist", "-f", fmt, "-o", out, source_url]
         if telegram:
             cmd[1:1] = ["--add-header", f"Referer:{telegram['embed_url']}"]
         elif yummy_source:
             cmd[1:1] = ["--referer", yummy_source["referer"],
                         "--user-agent", "Mozilla/5.0"]
+        elif embedded:
+            cmd[1:1] = ["--referer", embedded["referer"],
+                        "--user-agent", GENERIC_USER_AGENT]
         cmd.insert(1, "--newline")  # Print progress on separate lines for live updates.
         job_id = uuid.uuid4().hex[:12]
         job = {"pct": 0.0, "phase": "queued", "name": "", "file": None, "error": None,

@@ -23,6 +23,12 @@ The **Automatic** player option tries the available supported players in this or
 
 Kodik applies country restrictions to some videos. VideoGrab respects that restriction and reports it directly when Kodik does not make the selected video available from the current network.
 
+## Embedded players and site limits
+
+When a page is not supported directly by `yt-dlp`, VideoGrab also looks for public embedded players and direct video, HLS, or DASH sources. It can follow up to two nested player pages and passes the required page address as the download referer. This fallback is automatic and does not require choosing a site-specific mode.
+
+No downloader can work with every page. VideoGrab does not bypass DRM, sign-in requirements, paywalls, CAPTCHA or anti-bot challenges, or country restrictions. When one of these checks hides the player, the app reports the restriction instead of trying to circumvent it.
+
 ## Start on macOS
 
 1. Open **Terminal**: press `Cmd + Space`, type `Terminal`, then press `Enter`.
