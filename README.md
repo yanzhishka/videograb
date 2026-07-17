@@ -100,13 +100,3 @@ winget install Gyan.FFmpeg
 sudo apt update
 sudo apt install python3 yt-dlp ffmpeg
 ```
-
-## AniLiberty
-
-Поддерживаются ссылки на эпизоды вида:
-
-```text
-https://www.anilibria.top/anime/video/episode/<id-эпизода>
-```
-
-Доступные на странице качества отображаются в программе.
