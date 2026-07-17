@@ -19,7 +19,9 @@ Private posts and Telegram Stories require an authenticated Telegram session. Te
 
 Paste a title page from `old.yummyani.me/catalog/item/`. VideoGrab loads the available episodes and shows separate selectors for the episode, voice or subtitles, player, and quality.
 
-The **Automatic** player option tries the available supported players in this order: CVH, Aksor, and Sibnet. You can also select one of these players manually. Only combinations backed by a supported downloadable player are shown.
+The **Automatic** player option tries the available supported players in this order: CVH, Aksor, Sibnet, and Kodik. You can also select one of these players manually. Only combinations backed by a supported downloadable player are shown.
+
+Kodik applies country restrictions to some videos. VideoGrab respects that restriction and reports it directly when Kodik does not make the selected video available from the current network.
 
 ## Start on macOS
 

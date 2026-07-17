@@ -3,6 +3,7 @@
 
 Run:  python3 videograb.py  →  open http://localhost:8742
 """
+import base64
 import collections
 import html
 import json
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -40,8 +42,9 @@ ANILIBRIA_EPISODE_PATH = re.compile(r"^/anime/video/episode/([0-9a-f-]+)$", re.I
 TELEGRAM_HOSTS = {"t.me", "www.t.me", "telegram.me", "www.telegram.me",
                   "telegram.dog", "www.telegram.dog"}
 YUMMY_HOSTS = {"old.yummyani.me"}
-YUMMY_PLAYERS = {"CVH", "Aksor", "Sibnet"}
-YUMMY_PLAYER_PRIORITY = {"CVH": 0, "Aksor": 1, "Sibnet": 2}
+YUMMY_PLAYERS = {"CVH", "Aksor", "Sibnet", "Kodik"}
+YUMMY_PLAYER_PRIORITY = {"CVH": 0, "Aksor": 1, "Sibnet": 2, "Kodik": 3}
+KODIK_HOSTS = {"kodikplayer.com", "kodik.info", "kodik.cc", "aniqit.com"}
 YUMMY_CACHE = {}
 YUMMY_PLAYER_LABEL = "\u041f\u043b\u0435\u0435\u0440"
 YUMMY_SUBTITLES_LABEL = "\u0421\u0443\u0431\u0442\u0438\u0442\u0440\u044b"
@@ -307,6 +310,112 @@ def _resolve_yummy_aksor(item, requested_height):
     return _pick_height(by_height, requested_height), "https://player.aksor.tv/"
 
 
+def _kodik_response(request, action):
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        if "promo-error" in body:
+            raise SourceError(
+                "Kodik cannot play this video from the current country or network"
+            ) from exc
+        raise SourceError(f"{action}: HTTP {exc.code}") from exc
+    except Exception as exc:
+        raise SourceError(f"{action}: {exc}") from exc
+
+
+def _kodik_decode(value):
+    shifted = []
+    for char in value:
+        code = ord(char)
+        if 65 <= code <= 90 or 97 <= code <= 122:
+            limit = 90 if code <= 90 else 122
+            code += 18
+            if code > limit:
+                code -= 26
+        shifted.append(chr(code))
+    encoded = "".join(shifted)
+    encoded += "=" * (-len(encoded) % 4)
+    try:
+        return base64.b64decode(encoded).decode("utf-8")
+    except Exception as exc:
+        raise SourceError("Kodik returned an unreadable video link") from exc
+
+
+def _resolve_yummy_kodik(item, requested_height):
+    parsed = urllib.parse.urlsplit(item["iframe_url"])
+    if (parsed.hostname or "").lower() not in KODIK_HOSTS:
+        raise SourceError("Kodik provided an unexpected player host")
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 Chrome/126 Safari/537.36",
+        "Referer": "https://old.yummyani.me/",
+    }
+    page = _kodik_response(
+        urllib.request.Request(item["iframe_url"], headers=headers),
+        "Could not open the Kodik player",
+    ).decode("utf-8", errors="replace")
+
+    params_match = re.search(r"var\s+urlParams\s*=\s*(['\"])(.*?)\1", page, re.DOTALL)
+    video_match = re.search(r"var\s+videoId\s*=\s*['\"](\d+)['\"]", page)
+    hash_match = re.search(r"vInfo\.hash\s*=\s*['\"]([^'\"]+)['\"]", page)
+    type_match = re.search(r"vInfo\.type\s*=\s*['\"]([^'\"]+)['\"]", page)
+    if not all((params_match, video_match, hash_match, type_match)):
+        raise SourceError("Kodik did not provide playable video information")
+    try:
+        url_params = json.loads(html.unescape(params_match.group(2)))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise SourceError("Kodik returned unreadable player information") from exc
+    if not isinstance(url_params, dict):
+        raise SourceError("Kodik returned invalid player information")
+
+    values = [(str(key), str(value)) for key, value in url_params.items()]
+    values += [
+        ("hash", hash_match.group(1)),
+        ("id", video_match.group(1)),
+        ("type", type_match.group(1)),
+        ("bad_user", "true"),
+        ("cdn_is_working", "true"),
+        ("info", "{}"),
+    ]
+    body = "&".join(f"{key}={value}" for key, value in values).encode("utf-8")
+    request = urllib.request.Request(
+        origin + "/ftor",
+        data=body,
+        headers={
+            **headers,
+            "Referer": item["iframe_url"],
+            "Origin": origin,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+        },
+    )
+    raw_payload = _kodik_response(request, "Could not load the Kodik video")
+    try:
+        payload = json.loads(raw_payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise SourceError("Kodik returned unreadable video information") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("links"), dict):
+        raise SourceError("Kodik did not provide any playable video links")
+
+    sources = {}
+    for quality, variants in payload["links"].items():
+        if (not isinstance(variants, list) or not variants
+                or not isinstance(variants[0], dict)):
+            continue
+        encoded = variants[0].get("src")
+        height = re.search(r"\d+", str(quality))
+        if not encoded or not height:
+            continue
+        source_url = urllib.parse.urljoin(origin + "/", _kodik_decode(str(encoded)))
+        if source_url.startswith(("https://", "http://")):
+            sources[int(height.group())] = source_url
+    return _pick_height(sources, requested_height), "https://kodik.info/"
+
+
 def _select_yummy_source(catalog, selection, requested_height):
     if not isinstance(selection, dict):
         raise SourceError("Choose an episode, voice, and player")
@@ -328,6 +437,8 @@ def _select_yummy_source(catalog, selection, requested_height):
                 source_url, referer = _resolve_yummy_cvh(item, requested_height)
             elif item["player"] == "Aksor":
                 source_url, referer = _resolve_yummy_aksor(item, requested_height)
+            elif item["player"] == "Kodik":
+                source_url, referer = _resolve_yummy_kodik(item, requested_height)
             else:
                 source_url, referer = item["iframe_url"], catalog["url"]
             title = f'{catalog["title"]} - Episode {episode} - {voice} ({item["player"]})'
