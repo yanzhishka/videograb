@@ -774,6 +774,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if not ensure_dependencies():
         raise SystemExit(1)
+    ytdlp = "есть" if shutil.which("yt-dlp") else "нет"
     ff = "есть" if shutil.which("ffmpeg") else "нет (YouTube будет максимум 720p, аудио без mp3)"
-    print(f"VideoGrab запущен: http://localhost:{PORT}   ffmpeg: {ff}")
+    print(f"VideoGrab запущен: http://localhost:{PORT}   yt-dlp: {ytdlp}   ffmpeg: {ff}")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
