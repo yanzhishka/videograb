@@ -1,6 +1,19 @@
 # VideoGrab
 
-A local app for downloading video or audio from a link.
+A local app for downloading video, audio, and public Telegram post media from a link.
+
+## Telegram links
+
+VideoGrab supports public Telegram post links such as:
+
+```text
+https://t.me/Telegram/429
+https://t.me/s/Telegram/429
+```
+
+Posts containing one video or photo are downloaded as a regular media file. Posts containing several photos are downloaded as a ZIP archive.
+
+Private posts and Telegram Stories require an authenticated Telegram session. Telegram does not expose their media on the public link page, so they are not available in the current public-only mode.
 
 ## Start on macOS
 

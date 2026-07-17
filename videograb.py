@@ -6,6 +6,7 @@ Run:  python3 videograb.py  →  open http://localhost:8742
 import collections
 import html
 import json
+import mimetypes
 import os
 import platform
 import re
@@ -18,6 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -35,6 +37,8 @@ DEPENDENCIES = {
 
 ANILIBRIA_HOSTS = {"anilibria.top", "www.anilibria.top", "aniliberty.top", "www.aniliberty.top"}
 ANILIBRIA_EPISODE_PATH = re.compile(r"^/anime/video/episode/([0-9a-f-]+)$", re.IGNORECASE)
+TELEGRAM_HOSTS = {"t.me", "www.t.me", "telegram.me", "www.telegram.me",
+                  "telegram.dog", "www.telegram.dog"}
 NUXT_DATA = re.compile(
     r'<script[^>]+id=["\']__NUXT_DATA__["\'][^>]*>(.*?)</script>', re.DOTALL
 )
@@ -118,10 +122,165 @@ def _pick_anilibria_source(sources, requested_height=None):
     return sources[max(eligible)] if eligible else sources[min(sources)]
 
 
+def _safe_filename(title):
+    title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", title).strip()
+    return (title or "video")[:150].rstrip()
+
+
 def _safe_title(title):
     # Do not allow path separators or yt-dlp templates in the file name.
-    title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", title).strip().replace("%", "%%")
-    return (title or "video")[:150].rstrip()
+    return _safe_filename(title).replace("%", "%%")
+
+
+def _telegram_target(url):
+    """Parse public Telegram post and story links."""
+    parsed = urllib.parse.urlsplit(url)
+    hostname = (parsed.hostname or "").lower()
+    parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
+
+    username = None
+    if hostname in TELEGRAM_HOSTS:
+        if not parts:
+            return None
+        if parts[0] == "c" and len(parts) >= 3:
+            return {"kind": "private", "username": parts[1], "id": parts[2]}
+        if parts[0] == "s" and len(parts) >= 3 and parts[2].isdigit():
+            return {"kind": "post", "username": parts[1], "id": parts[2]}
+        username = parts[0]
+        parts = parts[1:]
+    elif hostname.endswith(".t.me") and hostname != "www.t.me":
+        username = hostname[:-5]
+    else:
+        return None
+
+    if len(parts) >= 2 and parts[0] == "s" and (parts[1].isdigit() or parts[1] == "live"):
+        return {"kind": "story", "username": username, "id": parts[1]}
+    if parts and parts[0].isdigit():
+        return {"kind": "post", "username": username, "id": parts[0]}
+    return None
+
+
+def _telegram_post(url):
+    """Extract downloadable media from a public Telegram post preview."""
+    target = _telegram_target(url)
+    if not target:
+        return None
+    if target["kind"] == "private":
+        raise SourceError("Private Telegram posts require an authenticated Telegram session")
+    if target["kind"] == "story":
+        raise SourceError(
+            "Telegram stories require an authenticated Telegram session; public t.me pages do not expose story media"
+        )
+
+    username, post_id = target["username"], target["id"]
+    embed_url = f"https://t.me/{urllib.parse.quote(username)}/{post_id}?embed=1&mode=tme"
+    request = urllib.request.Request(
+        embed_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            page = response.read().decode(response.headers.get_content_charset() or "utf-8")
+    except Exception as exc:
+        raise SourceError(f"Could not open the Telegram post: {exc}") from exc
+
+    if "tgme_widget_message_error" in page:
+        raise SourceError("Telegram did not provide a public preview for this post")
+
+    media = []
+    for kind, pattern in (
+        ("video", r'<video\b[^>]*\bsrc="([^"]+)"'),
+        ("audio", r'<audio\b[^>]*\bsrc="([^"]+)"'),
+        ("photo", (r'class="[^"]*tgme_widget_message_photo_wrap[^"]*"[^>]*'
+                   r'background-image:url\(\'([^\']+)\'\)')),
+    ):
+        for media_url in re.findall(pattern, page, re.IGNORECASE | re.DOTALL):
+            media_url = html.unescape(media_url)
+            if media_url.startswith(("https://", "http://")):
+                media.append({"kind": kind, "url": media_url})
+
+    unique_media = []
+    seen = set()
+    for item in media:
+        if item["url"] not in seen:
+            seen.add(item["url"])
+            unique_media.append(item)
+    if not unique_media:
+        raise SourceError("No downloadable media was found in this public Telegram post")
+
+    return {
+        "title": f"Telegram @{username} post {post_id}",
+        "media": unique_media,
+        "embed_url": embed_url,
+    }
+
+
+def _media_extension(item, content_type=None):
+    suffix = Path(urllib.parse.urlsplit(item["url"]).path).suffix.lower()
+    if re.fullmatch(r"\.[a-z0-9]{2,5}", suffix):
+        return suffix
+    guessed = mimetypes.guess_extension((content_type or "").split(";", 1)[0].strip())
+    if guessed == ".jpe":
+        guessed = ".jpg"
+    return guessed or {"video": ".mp4", "audio": ".mp3", "photo": ".jpg"}.get(item["kind"], ".bin")
+
+
+def _run_direct_media_job(job, media, title, referer):
+    """Download one or more direct media files and ZIP albums."""
+    downloaded = []
+    try:
+        with SLOTS:
+            if job["cancelled"]:
+                return
+            job["phase"] = "download"
+            total_items = len(media)
+            base_name = _safe_filename(title)
+            for index, item in enumerate(media, 1):
+                if job["cancelled"]:
+                    return
+                request = urllib.request.Request(
+                    item["url"],
+                    headers={"User-Agent": "Mozilla/5.0", "Referer": referer},
+                )
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    size = int(response.headers.get("Content-Length", 0))
+                    extension = _media_extension(item, response.headers.get("Content-Type"))
+                    numbered = f" {index}" if total_items > 1 else ""
+                    destination = Path(job["tmp"].name) / f"{base_name}{numbered}{extension}"
+                    received = 0
+                    with destination.open("wb") as output:
+                        while True:
+                            if job["cancelled"]:
+                                return
+                            chunk = response.read(1024 * 256)
+                            if not chunk:
+                                break
+                            output.write(chunk)
+                            received += len(chunk)
+                            item_progress = received / size if size else 0
+                            job["pct"] = ((index - 1) + item_progress) / total_items * 100
+                    downloaded.append(destination)
+
+            if len(downloaded) == 1:
+                job["file"] = downloaded[0]
+            else:
+                archive = Path(job["tmp"].name) / f"{base_name}.zip"
+                job["phase"] = "processing"
+                with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+                    for file in downloaded:
+                        output.write(file, file.name)
+                job["file"] = archive
+            job["name"] = job["file"].stem
+            job["pct"] = 100.0
+    except Exception as exc:
+        job["error"] = str(exc)
+    finally:
+        if job["error"] or job["cancelled"]:
+            job["tmp"].cleanup()
 
 
 def _missing_dependencies():
@@ -393,7 +552,7 @@ INDEX = """<!doctype html>
   <div class="logo">Video<b>Grab</b></div>
 
   <h1>Link <span>&rarr;</span> file</h1>
-  <p class="sub">Video or audio from 1,800+ sites — in the best available quality.</p>
+  <p class="sub">Video, audio, and public Telegram media — in the best available quality.</p>
 
   <main>
     <form id="f" class="pill">
@@ -402,8 +561,8 @@ INDEX = """<!doctype html>
         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
         <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
       </svg>
-      <input id="url" type="url" required placeholder="Paste a video link"
-             aria-label="Video link" autocomplete="off" autofocus>
+      <input id="url" type="url" required placeholder="Paste a media link"
+             aria-label="Media link" autocomplete="off" autofocus>
       <button type="submit" class="go" id="btn" aria-label="Download">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -425,7 +584,7 @@ INDEX = """<!doctype html>
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="2" y="5" width="14" height="14" rx="2"/><path d="m16 10 6-3v10l-6-3"/>
           </svg>
-          Video
+          Media
         </button>
         <button type="button" data-mode="audio" aria-pressed="false">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -456,7 +615,7 @@ INDEX = """<!doctype html>
     <div id="dl-list"></div>
   </div>
 
-  <p class="sites">YouTube &middot; VK Video &middot; TikTok &middot; Instagram &middot; X &middot;
+  <p class="sites">YouTube &middot; Telegram &middot; VK Video &middot; TikTok &middot; Instagram &middot; X &middot;
      Rutube &middot; Twitch &middot; Pornhub &middot; and 1,800+ more</p>
 
   <footer>Runs locally — your links are not sent anywhere. The file is saved to Downloads.</footer>
@@ -517,7 +676,9 @@ f.addEventListener('submit', async e => {
       for (const b of [192, 128]) if (!p.max_abr || b < p.max_abr) opts.push([String(b), b + ' kbps']);
       renderOpts(opts);
     } else {
-      renderOpts(p.heights.length
+      renderOpts(p.original_only
+        ? [['max', 'Original media']]
+        : p.heights.length
         ? p.heights.map((h, i) => [String(h), h + 'p' + (i === 0 ? ' · maximum' : '')])
         : FALLBACK);
     }
@@ -687,9 +848,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "a link starting with http:// or https:// is required"})
                 return
             try:
+                telegram = _telegram_post(u)
                 anilibria = _anilibria_episode(u)
             except SourceError as exc:
                 self._json(422, {"error": str(exc)})
+                return
+            if telegram:
+                self._json(200, {"title": telegram["title"], "heights": [],
+                                 "max_abr": None, "original_only": True})
                 return
             if anilibria:
                 self._json(200, {"title": anilibria["title"],
@@ -760,18 +926,41 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            telegram = _telegram_post(url)
             anilibria = _anilibria_episode(url)
         except SourceError as exc:
             self._json(422, {"error": str(exc)})
             return
 
         tmp = tempfile.TemporaryDirectory()
+        if telegram and data.get("mode") != "audio":
+            job_id = uuid.uuid4().hex[:12]
+            job = {"pct": 0.0, "phase": "queued", "name": telegram["title"],
+                   "file": None, "error": None, "tmp": tmp, "proc": None, "cancelled": False}
+            JOBS[job_id] = job
+            threading.Thread(
+                target=_run_direct_media_job,
+                args=(job, telegram["media"], telegram["title"], telegram["embed_url"]),
+                daemon=True,
+            ).start()
+            self._json(200, {"id": job_id})
+            return
+
         ffmpeg = shutil.which("ffmpeg")
         quality = str(data.get("quality", ""))
         h = int(quality) if quality.isdigit() and 100 <= int(quality) <= 8640 else None
-        source_url = _pick_anilibria_source(anilibria["sources"], h) if anilibria else url
-        out = (str(Path(tmp.name) / (_safe_title(anilibria["title"]) + ".%(ext)s"))
-               if anilibria else str(Path(tmp.name) / "%(title).150B.%(ext)s"))
+        if telegram:
+            playable = next((item for item in telegram["media"] if item["kind"] in {"video", "audio"}), None)
+            if not playable:
+                tmp.cleanup()
+                self._json(422, {"error": "This Telegram post contains photos but no audio track"})
+                return
+            source_url = playable["url"]
+            out = str(Path(tmp.name) / (_safe_title(telegram["title"]) + ".%(ext)s"))
+        else:
+            source_url = _pick_anilibria_source(anilibria["sources"], h) if anilibria else url
+            out = (str(Path(tmp.name) / (_safe_title(anilibria["title"]) + ".%(ext)s"))
+                   if anilibria else str(Path(tmp.name) / "%(title).150B.%(ext)s"))
         if data.get("mode") == "audio":
             # Without ffmpeg, MP3 conversion is unavailable, so use the source audio format.
             bitrate = {"192": "192K", "128": "128K"}.get(quality, "0")  # 0 = best VBR
@@ -795,6 +984,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Without ffmpeg, yt-dlp cannot merge video and audio; use the best ready-made file.
                 fmt = f"b[height<={h}]/b" if h else "b"
                 cmd = ["yt-dlp", "--no-playlist", "-f", fmt, "-o", out, url]
+        if telegram:
+            cmd[1:1] = ["--add-header", f"Referer:{telegram['embed_url']}"]
         cmd.insert(1, "--newline")  # Print progress on separate lines for live updates.
         job_id = uuid.uuid4().hex[:12]
         job = {"pct": 0.0, "phase": "queued", "name": "", "file": None, "error": None,
