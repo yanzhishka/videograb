@@ -26,6 +26,31 @@ python3 app.py
 
 Для остановки программы вернитесь в Terminal и нажмите `Ctrl + C`.
 
+## Запуск на Windows
+
+1. Установите [Python 3](https://www.python.org/downloads/windows/). Во время установки отметьте пункт **Add Python to PATH**.
+2. Откройте командную строку: нажмите `Win + R`, введите `cmd` и нажмите `Enter`.
+3. В окне командной строки напечатайте `py ` — после команды обязательно оставьте пробел.
+4. Перетащите файл `app.py` в окно командной строки. Его полный путь подставится сам.
+5. Нажмите `Enter`.
+
+Команда будет выглядеть примерно так:
+
+```bat
+py "C:\Users\Ваше имя\Desktop\videograb\app.py"
+```
+
+Вместо перетаскивания можно указать путь вручную:
+
+```bat
+cd /d "C:\Users\Ваше имя\Desktop\videograb"
+py app.py
+```
+
+После запуска откройте в браузере [http://localhost:8742](http://localhost:8742), вставьте ссылку и выберите качество.
+
+Для остановки программы вернитесь в командную строку и нажмите `Ctrl + C`.
+
 ## Требования
 
 - Python 3
@@ -36,6 +61,13 @@ python3 app.py
 
 ```bash
 brew install python yt-dlp ffmpeg
+```
+
+На Windows после установки Python выполните в командной строке:
+
+```bat
+py -m pip install -U yt-dlp
+winget install Gyan.FFmpeg
 ```
 
 ## AniLiberty
