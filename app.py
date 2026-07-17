@@ -23,7 +23,7 @@ PORT = 8742
 # id задачи -> {pct, phase, name, file, error, tmp}
 # Задачи с незабранным файлом хранятся до перезапуска сервера.
 JOBS = {}
-SLOTS = threading.Semaphore(2)  # ponytail: 2 параллельных скачивания, остальные ждут в очереди
+SLOTS = threading.Semaphore(2)  # Одновременно выполняются две загрузки.
 
 ANILIBRIA_HOSTS = {"anilibria.top", "www.anilibria.top", "aniliberty.top", "www.aniliberty.top"}
 ANILIBRIA_EPISODE_PATH = re.compile(r"^/anime/video/episode/([0-9a-f-]+)$", re.IGNORECASE)
