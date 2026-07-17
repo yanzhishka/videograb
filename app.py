@@ -6,9 +6,12 @@
 import collections
 import html
 import json
+import os
+import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -24,6 +27,11 @@ PORT = 8742
 # Задачи с незабранным файлом хранятся до перезапуска сервера.
 JOBS = {}
 SLOTS = threading.Semaphore(2)  # Одновременно выполняются две загрузки.
+
+DEPENDENCIES = {
+    "yt-dlp": "yt-dlp",
+    "ffmpeg": "ffmpeg",
+}
 
 ANILIBRIA_HOSTS = {"anilibria.top", "www.anilibria.top", "aniliberty.top", "www.aniliberty.top"}
 ANILIBRIA_EPISODE_PATH = re.compile(r"^/anime/video/episode/([0-9a-f-]+)$", re.IGNORECASE)
@@ -114,6 +122,113 @@ def _safe_title(title):
     # В имени файла не должно быть ни разделителей пути, ни шаблонов yt-dlp.
     title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", title).strip().replace("%", "%%")
     return (title or "video")[:150].rstrip()
+
+
+def _missing_dependencies():
+    return [name for name, executable in DEPENDENCIES.items() if not shutil.which(executable)]
+
+
+def _confirm(question):
+    try:
+        answer = input(question).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in {"y", "yes", "д", "да"}
+
+
+def _admin_command(command):
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return command
+    return ["sudo", *command]
+
+
+def _install_commands(missing):
+    """Возвращает команды установки для доступного менеджера пакетов."""
+    system = platform.system()
+    packages = {"yt-dlp": "yt-dlp", "ffmpeg": "ffmpeg"}
+
+    if system == "Windows":
+        if not shutil.which("winget"):
+            return None, "Не найден winget. Установите «App Installer» из Microsoft Store и запустите файл снова."
+        winget = ["winget", "install", "--exact", "--accept-package-agreements",
+                  "--accept-source-agreements", "--id"]
+        package_ids = {"yt-dlp": "yt-dlp.yt-dlp", "ffmpeg": "Gyan.FFmpeg"}
+        return [winget + [package_ids[name]] for name in missing], None
+
+    if system == "Darwin":
+        if not shutil.which("brew"):
+            return None, ("Не найден Homebrew. Установите его с https://brew.sh, "
+                          "затем запустите файл снова.")
+        return [["brew", "install", *[packages[name] for name in missing]]], None
+
+    if system == "Linux":
+        requested = [packages[name] for name in missing]
+        if shutil.which("apt"):
+            return [_admin_command(["apt", "update"]),
+                    _admin_command(["apt", "install", "-y", *requested])], None
+        if shutil.which("dnf"):
+            return [_admin_command(["dnf", "install", "-y", *requested])], None
+        if shutil.which("pacman"):
+            return [_admin_command(["pacman", "-S", "--needed", *requested])], None
+        return None, "Не найден поддерживаемый менеджер пакетов (apt, dnf или pacman)."
+
+    return None, f"Автоматическая установка не поддерживается для системы: {system}."
+
+
+def _refresh_path():
+    """Добавляет типичные каталоги менеджеров пакетов в PATH текущего процесса."""
+    candidates = [
+        "/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local" / "bin"),
+    ]
+    if platform.system() == "Windows":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            candidates += [
+                str(Path(local_app_data) / "Microsoft" / "WinGet" / "Links"),
+                str(Path(local_app_data) / "Microsoft" / "WindowsApps"),
+            ]
+    path_items = os.environ.get("PATH", "").split(os.pathsep)
+    additions = [folder for folder in candidates if Path(folder).is_dir() and folder not in path_items]
+    if additions:
+        os.environ["PATH"] = os.pathsep.join([*additions, *path_items])
+
+
+def ensure_dependencies():
+    missing = _missing_dependencies()
+    if not missing:
+        return True
+
+    names = ", ".join(missing)
+    print(f"Не найдены: {names}.")
+    if not _confirm("Установить их сейчас? [y/N]: "):
+        print("Установка отменена.")
+        return False
+
+    commands, problem = _install_commands(missing)
+    if problem:
+        print(problem)
+        return False
+
+    for command in commands:
+        try:
+            result = subprocess.run(command).returncode
+        except OSError as exc:
+            print(f"Не удалось запустить установщик: {exc}")
+            return False
+        if result != 0:
+            print("Установка завершилась с ошибкой.")
+            return False
+
+    _refresh_path()
+    still_missing = _missing_dependencies()
+    if still_missing:
+        print("После установки всё ещё не найдены: " + ", ".join(still_missing))
+        print("Закройте и снова откройте Terminal, затем запустите файл ещё раз.")
+        return False
+
+    print("Зависимости установлены. Выполняю повторную проверку и запускаю программу…")
+    os.execv(sys.executable, [sys.executable, *sys.argv])
 
 INDEX = """<!doctype html>
 <html lang="ru">
@@ -657,6 +772,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if not ensure_dependencies():
+        raise SystemExit(1)
     ff = "есть" if shutil.which("ffmpeg") else "нет (YouTube будет максимум 720p, аудио без mp3)"
     print(f"VideoGrab запущен: http://localhost:{PORT}   ffmpeg: {ff}")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
