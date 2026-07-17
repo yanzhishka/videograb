@@ -51,6 +51,30 @@ py app.py
 
 Для остановки программы вернитесь в командную строку и нажмите `Ctrl + C`.
 
+## Запуск на Linux
+
+1. Откройте Terminal из меню приложений или нажмите `Ctrl + Alt + T`.
+2. Введите `python3 ` — после команды обязательно оставьте пробел.
+3. Перетащите файл `app.py` в окно Terminal. В большинстве графических оболочек его полный путь подставится сам.
+4. Нажмите `Enter`.
+
+Команда будет выглядеть примерно так:
+
+```bash
+python3 /home/ваше-имя/videograb/app.py
+```
+
+Вместо перетаскивания можно указать путь вручную:
+
+```bash
+cd /home/ваше-имя/videograb
+python3 app.py
+```
+
+После запуска откройте в браузере [http://localhost:8742](http://localhost:8742), вставьте ссылку и выберите качество.
+
+Для остановки программы вернитесь в Terminal и нажмите `Ctrl + C`.
+
 ## Требования
 
 - Python 3
@@ -68,6 +92,13 @@ brew install python yt-dlp ffmpeg
 ```bat
 py -m pip install -U yt-dlp
 winget install Gyan.FFmpeg
+```
+
+На Ubuntu и Debian зависимости можно установить так:
+
+```bash
+sudo apt update
+sudo apt install python3 yt-dlp ffmpeg
 ```
 
 ## AniLiberty
