@@ -143,6 +143,10 @@ def _admin_command(command):
     return ["sudo", *command]
 
 
+def _is_qubes_os():
+    return Path("/etc/qubes-release").exists() or "QUBES_VMNAME" in os.environ
+
+
 def _install_commands(missing):
     """Return installation commands for the available package manager."""
     system = platform.system()
@@ -164,14 +168,39 @@ def _install_commands(missing):
 
     if system == "Linux":
         requested = [packages[name] for name in missing]
+        # Immutable Fedora-family systems apply layered packages after a reboot.
+        if shutil.which("rpm-ostree"):
+            return [_admin_command(["rpm-ostree", "install", *requested])], None
         if shutil.which("apt"):
             return [_admin_command(["apt", "update"]),
                     _admin_command(["apt", "install", "-y", *requested])], None
+        if shutil.which("apt-get"):
+            return [_admin_command(["apt-get", "update"]),
+                    _admin_command(["apt-get", "install", "-y", *requested])], None
         if shutil.which("dnf"):
             return [_admin_command(["dnf", "install", "-y", *requested])], None
+        if shutil.which("yum"):
+            return [_admin_command(["yum", "install", "-y", *requested])], None
+        if shutil.which("zypper"):
+            return [_admin_command(["zypper", "--non-interactive", "install", *requested])], None
         if shutil.which("pacman"):
             return [_admin_command(["pacman", "-S", "--needed", *requested])], None
-        return None, "No supported package manager was found (apt, dnf, or pacman)."
+        if shutil.which("xbps-install"):
+            return [_admin_command(["xbps-install", "-S"]),
+                    _admin_command(["xbps-install", "-y", *requested])], None
+        if shutil.which("apk"):
+            return [_admin_command(["apk", "add", *requested])], None
+        if shutil.which("emerge"):
+            gentoo_packages = {"yt-dlp": "net-misc/yt-dlp", "ffmpeg": "media-video/ffmpeg"}
+            return [_admin_command(["emerge", "--ask=n", *[gentoo_packages[name] for name in missing]])], None
+        if shutil.which("eopkg"):
+            return [_admin_command(["eopkg", "install", "-y", *requested])], None
+        if shutil.which("nix"):
+            return [["nix", "profile", "install", *[f"nixpkgs#{name}" for name in requested]]], None
+        if shutil.which("guix"):
+            return [["guix", "install", *requested]], None
+        return None, ("No supported package manager was found (rpm-ostree, apt, dnf, yum, zypper, "
+                      "pacman, xbps, apk, emerge, eopkg, Nix, or Guix).")
 
     return None, f"Automatic installation is not supported on: {system}."
 
@@ -205,6 +234,10 @@ def ensure_dependencies():
         print("Installation cancelled.")
         return False
 
+    if _is_qubes_os():
+        print("Qubes OS detected. For a persistent installation, run this in the TemplateVM, "
+              "then restart the qubes based on that template.")
+
     commands, problem = _install_commands(missing)
     if problem:
         print(problem)
@@ -219,6 +252,10 @@ def ensure_dependencies():
         if result != 0:
             print("Installation failed.")
             return False
+
+    if any("rpm-ostree" in command for command in commands):
+        print("Packages are staged for the next boot. Restart the system, then run VideoGrab again.")
+        return False
 
     _refresh_path()
     still_missing = _missing_dependencies()

@@ -83,11 +83,22 @@ The app uses the system package manager:
 
 - Windows — `winget`;
 - macOS — Homebrew;
-- Ubuntu/Debian — `apt`;
-- Fedora — `dnf`;
-- Arch Linux — `pacman`.
+- Debian, Ubuntu, and derivatives — `apt` or `apt-get`;
+- Fedora, RHEL, and derivatives — `dnf` or `yum`;
+- Fedora Atomic, Silverblue, Kinoite, and other immutable RPM systems — `rpm-ostree`;
+- openSUSE — `zypper`;
+- Arch, Manjaro, BigLinux, and other `pacman`-based systems — `pacman`;
+- Void Linux — `xbps-install`;
+- Alpine Linux — `apk`;
+- Gentoo — `emerge`;
+- Solus — `eopkg`;
+- NixOS or Nix-enabled Linux — Nix;
+- GNU Guix System or Guix-enabled Linux — Guix;
+- Qubes OS — the package manager of the underlying TemplateVM (`apt` or `dnf`).
 
 If `winget` is unavailable on Windows, install **App Installer** from Microsoft Store. If Homebrew is unavailable on macOS, install it from [brew.sh](https://brew.sh), then run `videograb.py` again.
+
+On `rpm-ostree` systems, packages are staged for the next boot. Restart the computer after the installer finishes, then run `videograb.py` again. On Qubes OS, run the script in the TemplateVM for a persistent installation, then restart the qubes based on that template.
 
 You can also install the dependencies manually.
 
@@ -109,4 +120,11 @@ Ubuntu and Debian:
 ```bash
 sudo apt update
 sudo apt install python3 yt-dlp ffmpeg
+```
+
+rpm-ostree systems:
+
+```bash
+sudo rpm-ostree install yt-dlp ffmpeg
+systemctl reboot
 ```
