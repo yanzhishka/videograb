@@ -140,6 +140,8 @@ def _confirm(question):
 def _admin_command(command):
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         return command
+    if platform.system() == "OpenBSD" and shutil.which("doas"):
+        return ["doas", *command]
     return ["sudo", *command]
 
 
@@ -165,6 +167,12 @@ def _install_commands(missing):
             return None, ("Homebrew was not found. Install it from https://brew.sh, "
                           "then run this file again.")
         return [["brew", "install", *[packages[name] for name in missing]]], None
+
+    if system == "OpenBSD":
+        if not shutil.which("pkg_add"):
+            return None, "pkg_add was not found. Install the OpenBSD package tools, then run this file again."
+        requested = [packages[name] for name in missing]
+        return [_admin_command(["pkg_add", "-I", *requested])], None
 
     if system == "Linux":
         requested = [packages[name] for name in missing]

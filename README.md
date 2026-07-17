@@ -95,6 +95,7 @@ The app uses the system package manager:
 - NixOS or Nix-enabled Linux — Nix;
 - GNU Guix System or Guix-enabled Linux — Guix;
 - Qubes OS — the package manager of the underlying TemplateVM (`apt` or `dnf`).
+- OpenBSD — `pkg_add`.
 
 If `winget` is unavailable on Windows, install **App Installer** from Microsoft Store. If Homebrew is unavailable on macOS, install it from [brew.sh](https://brew.sh), then run `videograb.py` again.
 
@@ -127,4 +128,10 @@ rpm-ostree systems:
 ```bash
 sudo rpm-ostree install yt-dlp ffmpeg
 systemctl reboot
+```
+
+OpenBSD:
+
+```sh
+doas pkg_add -I yt-dlp ffmpeg
 ```
