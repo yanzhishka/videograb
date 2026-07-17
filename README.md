@@ -1,85 +1,85 @@
 # VideoGrab
 
-Локальная программа для скачивания видео или звука по ссылке.
+A local app for downloading video or audio from a link.
 
-## Запуск на macOS
+## Start on macOS
 
-1. Откройте **Terminal**: нажмите `Cmd + Space`, введите `Terminal` и нажмите `Enter`.
-2. В окне Terminal напечатайте `python3 ` — после команды обязательно оставьте пробел.
-3. Перетащите файл `app.py` в окно Terminal. Его полный путь подставится сам.
-4. Нажмите `Enter`.
+1. Open **Terminal**: press `Cmd + Space`, type `Terminal`, then press `Enter`.
+2. Type `python3 ` in Terminal and leave the trailing space.
+3. Drag `app.py` into the Terminal window. Its full path will be inserted automatically.
+4. Press `Enter`.
 
-Команда будет выглядеть примерно так:
+The command will look similar to this:
 
 ```bash
-python3 /Users/ваше-имя/Desktop/videograb/app.py
+python3 /Users/your-username/Desktop/videograb/app.py
 ```
 
-Вместо перетаскивания можно указать путь вручную:
+You can also enter the path manually:
 
 ```bash
-cd /Users/ваше-имя/Desktop/videograb
+cd /Users/your-username/Desktop/videograb
 python3 app.py
 ```
 
-После запуска откройте в браузере [http://localhost:8742](http://localhost:8742), вставьте ссылку и выберите качество.
+After starting the app, open [http://localhost:8742](http://localhost:8742) in a browser, paste a link, and choose the quality.
 
-Для остановки программы вернитесь в Terminal и нажмите `Ctrl + C`.
+To stop the app, return to Terminal and press `Ctrl + C`.
 
-## Запуск на Windows
+## Start on Windows
 
-1. Установите [Python 3](https://www.python.org/downloads/windows/). Во время установки отметьте пункт **Add Python to PATH**.
-2. Откройте командную строку: нажмите `Win + R`, введите `cmd` и нажмите `Enter`.
-3. В окне командной строки напечатайте `py ` — после команды обязательно оставьте пробел.
-4. Перетащите файл `app.py` в окно командной строки. Его полный путь подставится сам.
-5. Нажмите `Enter`.
+1. Install [Python 3](https://www.python.org/downloads/windows/). During installation, select **Add Python to PATH**.
+2. Open Command Prompt: press `Win + R`, type `cmd`, then press `Enter`.
+3. Type `py ` and leave the trailing space.
+4. Drag `app.py` into the Command Prompt window. Its full path will be inserted automatically.
+5. Press `Enter`.
 
-Команда будет выглядеть примерно так:
+The command will look similar to this:
 
 ```bat
-py "C:\Users\Ваше имя\Desktop\videograb\app.py"
+py "C:\Users\Your Name\Desktop\videograb\app.py"
 ```
 
-Вместо перетаскивания можно указать путь вручную:
+You can also enter the path manually:
 
 ```bat
-cd /d "C:\Users\Ваше имя\Desktop\videograb"
+cd /d "C:\Users\Your Name\Desktop\videograb"
 py app.py
 ```
 
-После запуска откройте в браузере [http://localhost:8742](http://localhost:8742), вставьте ссылку и выберите качество.
+After starting the app, open [http://localhost:8742](http://localhost:8742) in a browser, paste a link, and choose the quality.
 
-Для остановки программы вернитесь в командную строку и нажмите `Ctrl + C`.
+To stop the app, return to Command Prompt and press `Ctrl + C`.
 
-## Запуск на Linux
+## Start on Linux
 
-1. Откройте Terminal из меню приложений или нажмите `Ctrl + Alt + T`.
-2. Введите `python3 ` — после команды обязательно оставьте пробел.
-3. Перетащите файл `app.py` в окно Terminal. В большинстве графических оболочек его полный путь подставится сам.
-4. Нажмите `Enter`.
+1. Open Terminal from the application menu or press `Ctrl + Alt + T`.
+2. Type `python3 ` and leave the trailing space.
+3. Drag `app.py` into the Terminal window. Most desktop environments will insert its full path automatically.
+4. Press `Enter`.
 
-Команда будет выглядеть примерно так:
+The command will look similar to this:
 
 ```bash
-python3 /home/ваше-имя/videograb/app.py
+python3 /home/your-username/videograb/app.py
 ```
 
-Вместо перетаскивания можно указать путь вручную:
+You can also enter the path manually:
 
 ```bash
-cd /home/ваше-имя/videograb
+cd /home/your-username/videograb
 python3 app.py
 ```
 
-После запуска откройте в браузере [http://localhost:8742](http://localhost:8742), вставьте ссылку и выберите качество.
+After starting the app, open [http://localhost:8742](http://localhost:8742) in a browser, paste a link, and choose the quality.
 
-Для остановки программы вернитесь в Terminal и нажмите `Ctrl + C`.
+To stop the app, return to Terminal and press `Ctrl + C`.
 
-## Требования
+## Requirements
 
-Нужен только Python 3. При первом запуске программа сама проверит `yt-dlp` и `ffmpeg`. Если чего-то не хватает, она покажет название недостающих программ и спросит, установить ли их. После установки программа автоматически выполнит повторную проверку и запустится.
+Only Python 3 is required. On first launch, VideoGrab checks for `yt-dlp` and `ffmpeg`. If either one is missing, it shows the missing programs and asks whether to install them. After installation, it checks again and starts automatically.
 
-Для установки используются системные менеджеры пакетов:
+The app uses the system package manager:
 
 - Windows — `winget`;
 - macOS — Homebrew;
@@ -87,24 +87,24 @@ python3 app.py
 - Fedora — `dnf`;
 - Arch Linux — `pacman`.
 
-Если на Windows нет `winget`, установите **App Installer** из Microsoft Store. Если на macOS нет Homebrew, сначала установите его с [brew.sh](https://brew.sh), затем запустите `app.py` повторно.
+If `winget` is unavailable on Windows, install **App Installer** from Microsoft Store. If Homebrew is unavailable on macOS, install it from [brew.sh](https://brew.sh), then run `app.py` again.
 
-Установить зависимости вручную при необходимости можно следующими командами.
+You can also install the dependencies manually.
 
-На macOS их можно установить через Homebrew:
+macOS:
 
 ```bash
 brew install python yt-dlp ffmpeg
 ```
 
-На Windows после установки Python выполните в командной строке:
+Windows:
 
 ```bat
 py -m pip install -U yt-dlp
 winget install Gyan.FFmpeg
 ```
 
-На Ubuntu и Debian зависимости можно установить так:
+Ubuntu and Debian:
 
 ```bash
 sudo apt update

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""VideoGrab — качает видео с YouTube, VK, TikTok и ~1800 других сайтов через yt-dlp.
+"""VideoGrab downloads video from YouTube, VK, TikTok, and ~1,800 other sites with yt-dlp.
 
-Запуск:  python3 app.py  →  открыть http://localhost:8742
+Run:  python3 app.py  →  open http://localhost:8742
 """
 import collections
 import html
@@ -23,10 +23,10 @@ from pathlib import Path
 
 PORT = 8742
 
-# id задачи -> {pct, phase, name, file, error, tmp}
-# Задачи с незабранным файлом хранятся до перезапуска сервера.
+# job ID -> {pct, phase, name, file, error, tmp}
+# Jobs whose files have not been retrieved are kept until the server restarts.
 JOBS = {}
-SLOTS = threading.Semaphore(2)  # Одновременно выполняются две загрузки.
+SLOTS = threading.Semaphore(2)  # Run two downloads at a time.
 
 DEPENDENCIES = {
     "yt-dlp": "yt-dlp",
@@ -41,11 +41,11 @@ NUXT_DATA = re.compile(
 
 
 class SourceError(Exception):
-    """Ошибка, которую можно безопасно показать пользователю."""
+    """An error message that is safe to show to the user."""
 
 
 def _anilibria_episode_id(url):
-    """Возвращает id эпизода AniLiberty, либо None для остальных сайтов."""
+    """Return an AniLiberty episode ID, or None for other sites."""
     parsed = urllib.parse.urlsplit(url)
     if parsed.hostname not in ANILIBRIA_HOSTS:
         return None
@@ -54,17 +54,17 @@ def _anilibria_episode_id(url):
 
 
 def _nuxt_ref(data, value):
-    """Разыменовывает значение из компактного формата __NUXT_DATA__."""
+    """Resolve a value in the compact __NUXT_DATA__ format."""
     if isinstance(value, int) and 0 <= value < len(data):
         return data[value]
     return value
 
 
 def _anilibria_episode(url):
-    """Извлекает HLS-плейлисты эпизода из SSR-данных страницы AniLiberty.
+    """Extract episode HLS playlists from AniLiberty page SSR data.
 
-    У AniLiberty нет extractor-а в yt-dlp: обычная страница не содержит тега
-    video. Но Nuxt кладёт ссылки на плейлисты нужного эпизода в __NUXT_DATA__.
+    yt-dlp does not have an AniLiberty extractor because the page does not
+    contain a video tag. Nuxt places the episode playlist URLs in __NUXT_DATA__.
     """
     episode_id = _anilibria_episode_id(url)
     if not episode_id:
@@ -81,15 +81,15 @@ def _anilibria_episode(url):
         with urllib.request.urlopen(request, timeout=30) as response:
             page = response.read().decode(response.headers.get_content_charset() or "utf-8")
     except Exception as exc:
-        raise SourceError(f"не удалось открыть страницу AniLiberty: {exc}") from exc
+        raise SourceError(f"Could not open the AniLiberty page: {exc}") from exc
 
     match = NUXT_DATA.search(page)
     if not match:
-        raise SourceError("AniLiberty не отдал данные эпизода — возможно, страница изменилась")
+        raise SourceError("AniLiberty did not provide episode data; the page may have changed")
     try:
         data = json.loads(match.group(1))
     except json.JSONDecodeError as exc:
-        raise SourceError("не удалось прочитать данные эпизода AniLiberty") from exc
+        raise SourceError("Could not read AniLiberty episode data") from exc
 
     sources = {}
     for item in data:
@@ -102,16 +102,16 @@ def _anilibria_episode(url):
                 sources[int(quality.group(1))] = source
         break
     if not sources:
-        raise SourceError("для этого эпизода AniLiberty не нашлись доступные видеопотоки")
+        raise SourceError("No available video streams were found for this AniLiberty episode")
 
     title_match = re.search(r"<title>(.*?)</title>", page, re.IGNORECASE | re.DOTALL)
     title = html.unescape(re.sub(r"\s*\|\s*Ani(?:Liberty|Libria)\s*$", "",
-                                 title_match.group(1)).strip()) if title_match else "эпизод AniLiberty"
+                                 title_match.group(1)).strip()) if title_match else "AniLiberty episode"
     return {"title": title, "sources": sources}
 
 
 def _pick_anilibria_source(sources, requested_height=None):
-    """Возвращает точное качество или ближайшее не выше выбранного."""
+    """Return the exact quality or the nearest one not above the request."""
     if requested_height in sources:
         return sources[requested_height]
     eligible = [height for height in sources if requested_height is None or height <= requested_height]
@@ -119,7 +119,7 @@ def _pick_anilibria_source(sources, requested_height=None):
 
 
 def _safe_title(title):
-    # В имени файла не должно быть ни разделителей пути, ни шаблонов yt-dlp.
+    # Do not allow path separators or yt-dlp templates in the file name.
     title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", title).strip().replace("%", "%%")
     return (title or "video")[:150].rstrip()
 
@@ -134,7 +134,7 @@ def _confirm(question):
     except (EOFError, KeyboardInterrupt):
         print()
         return False
-    return answer in {"y", "yes", "д", "да"}
+    return answer in {"y", "yes"}
 
 
 def _admin_command(command):
@@ -144,13 +144,13 @@ def _admin_command(command):
 
 
 def _install_commands(missing):
-    """Возвращает команды установки для доступного менеджера пакетов."""
+    """Return installation commands for the available package manager."""
     system = platform.system()
     packages = {"yt-dlp": "yt-dlp", "ffmpeg": "ffmpeg"}
 
     if system == "Windows":
         if not shutil.which("winget"):
-            return None, "Не найден winget. Установите «App Installer» из Microsoft Store и запустите файл снова."
+            return None, "winget was not found. Install App Installer from Microsoft Store, then run this file again."
         winget = ["winget", "install", "--exact", "--accept-package-agreements",
                   "--accept-source-agreements", "--id"]
         package_ids = {"yt-dlp": "yt-dlp.yt-dlp", "ffmpeg": "Gyan.FFmpeg"}
@@ -158,8 +158,8 @@ def _install_commands(missing):
 
     if system == "Darwin":
         if not shutil.which("brew"):
-            return None, ("Не найден Homebrew. Установите его с https://brew.sh, "
-                          "затем запустите файл снова.")
+            return None, ("Homebrew was not found. Install it from https://brew.sh, "
+                          "then run this file again.")
         return [["brew", "install", *[packages[name] for name in missing]]], None
 
     if system == "Linux":
@@ -171,13 +171,13 @@ def _install_commands(missing):
             return [_admin_command(["dnf", "install", "-y", *requested])], None
         if shutil.which("pacman"):
             return [_admin_command(["pacman", "-S", "--needed", *requested])], None
-        return None, "Не найден поддерживаемый менеджер пакетов (apt, dnf или pacman)."
+        return None, "No supported package manager was found (apt, dnf, or pacman)."
 
-    return None, f"Автоматическая установка не поддерживается для системы: {system}."
+    return None, f"Automatic installation is not supported on: {system}."
 
 
 def _refresh_path():
-    """Добавляет типичные каталоги менеджеров пакетов в PATH текущего процесса."""
+    """Add common package-manager directories to the current process PATH."""
     candidates = [
         "/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local" / "bin"),
     ]
@@ -200,9 +200,9 @@ def ensure_dependencies():
         return True
 
     names = ", ".join(missing)
-    print(f"Не найдены: {names}.")
-    if not _confirm("Установить их сейчас? [y/N]: "):
-        print("Установка отменена.")
+    print(f"Not found: {names}.")
+    if not _confirm("Install them now? [y/N]: "):
+        print("Installation cancelled.")
         return False
 
     commands, problem = _install_commands(missing)
@@ -214,28 +214,28 @@ def ensure_dependencies():
         try:
             result = subprocess.run(command).returncode
         except OSError as exc:
-            print(f"Не удалось запустить установщик: {exc}")
+            print(f"Could not start the installer: {exc}")
             return False
         if result != 0:
-            print("Установка завершилась с ошибкой.")
+            print("Installation failed.")
             return False
 
     _refresh_path()
     still_missing = _missing_dependencies()
     if still_missing:
-        print("После установки всё ещё не найдены: " + ", ".join(still_missing))
-        print("Закройте и снова откройте Terminal, затем запустите файл ещё раз.")
+        print("Still not found after installation: " + ", ".join(still_missing))
+        print("Close and reopen the terminal, then run this file again.")
         return False
 
-    print("Зависимости установлены. Выполняю повторную проверку и запускаю программу…")
+    print("Dependencies installed. Checking again and starting VideoGrab…")
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 INDEX = """<!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VideoGrab — ссылка в файл</title>
+<title>VideoGrab — Link to file</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@500;600&family=Inter:wght@400;500;600&display=swap');
   :root{
@@ -347,8 +347,8 @@ INDEX = """<!doctype html>
 <body>
   <div class="logo">Video<b>Grab</b></div>
 
-  <h1>Ссылка <span>&rarr;</span> файл</h1>
-  <p class="sub">Видео или звук с 1800+ сайтов — в лучшем доступном качестве.</p>
+  <h1>Link <span>&rarr;</span> file</h1>
+  <p class="sub">Video or audio from 1,800+ sites — in the best available quality.</p>
 
   <main>
     <form id="f" class="pill">
@@ -357,9 +357,9 @@ INDEX = """<!doctype html>
         <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
         <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
       </svg>
-      <input id="url" type="url" required placeholder="Вставь ссылку на видео"
-             aria-label="Ссылка на видео" autocomplete="off" autofocus>
-      <button type="submit" class="go" id="btn" aria-label="Скачать">
+      <input id="url" type="url" required placeholder="Paste a video link"
+             aria-label="Video link" autocomplete="off" autofocus>
+      <button type="submit" class="go" id="btn" aria-label="Download">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <line x1="12" y1="4" x2="12" y2="17"/><polyline points="6 11 12 17 18 11"/>
@@ -369,25 +369,25 @@ INDEX = """<!doctype html>
     </form>
 
     <div id="qpanel" hidden>
-      <span class="qtitle" id="qtitle">Качество:</span>
-      <div id="qopts" role="group" aria-label="Выбор качества"></div>
+      <span class="qtitle" id="qtitle">Quality:</span>
+      <div id="qopts" role="group" aria-label="Choose quality"></div>
     </div>
 
     <div class="controls">
-      <div class="seg" role="group" aria-label="Что скачать">
+      <div class="seg" role="group" aria-label="What to download">
         <button type="button" data-mode="video" aria-pressed="true">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="2" y="5" width="14" height="14" rx="2"/><path d="m16 10 6-3v10l-6-3"/>
           </svg>
-          Видео
+          Video
         </button>
         <button type="button" data-mode="audio" aria-pressed="false">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
           </svg>
-          Звук (mp3)
+          Audio (MP3)
         </button>
       </div>
       <button type="button" class="ghost" id="paste">
@@ -396,7 +396,7 @@ INDEX = """<!doctype html>
           <rect x="8" y="2" width="8" height="4" rx="1"/>
           <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
         </svg>
-        Вставить из буфера
+        Paste from clipboard
       </button>
     </div>
 
@@ -405,16 +405,16 @@ INDEX = """<!doctype html>
 
   <div id="dl" hidden>
     <div class="dl-head">
-      <span>Загрузки</span>
-      <button type="button" id="dlclear">очистить</button>
+      <span>Downloads</span>
+      <button type="button" id="dlclear">clear</button>
     </div>
     <div id="dl-list"></div>
   </div>
 
-  <p class="sites">YouTube &middot; VK Видео &middot; TikTok &middot; Instagram &middot; X &middot;
-     Rutube &middot; Twitch &middot; Pornhub &middot; и ещё 1800+</p>
+  <p class="sites">YouTube &middot; VK Video &middot; TikTok &middot; Instagram &middot; X &middot;
+     Rutube &middot; Twitch &middot; Pornhub &middot; and 1,800+ more</p>
 
-  <footer>Работает локально — ссылки никуда не отправляются. Файл падает в «Загрузки».</footer>
+  <footer>Runs locally — your links are not sent anywhere. The file is saved to Downloads.</footer>
 
 <script>
 const f = document.getElementById('f'), btn = document.getElementById('btn'),
@@ -423,8 +423,8 @@ const f = document.getElementById('f'), btn = document.getElementById('btn'),
       qtitle = document.getElementById('qtitle');
 let mode = 'video';
 
-// запасной список — если сайт не рассказал о своих форматах
-const FALLBACK = [['max', 'Максимум'], ['1080', '1080p'], ['720', '720p'], ['480', '480p']];
+// Fallback list when the site does not provide its available formats.
+const FALLBACK = [['max', 'Maximum'], ['1080', '1080p'], ['720', '720p'], ['480', '480p']];
 
 document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => {
   mode = b.dataset.mode;
@@ -439,12 +439,12 @@ document.getElementById('paste').addEventListener('click', async () => {
     url.focus();
   } catch {
     status.className = 'err';
-    status.textContent = 'Браузер не дал доступ к буферу — вставь ссылку вручную (Cmd+V)';
+    status.textContent = 'The browser denied clipboard access — paste the link manually (Ctrl/Cmd+V)';
   }
 });
 
 function renderOpts(opts) {
-  qtitle.textContent = 'Качество:';
+  qtitle.textContent = 'Quality:';
   qopts.replaceChildren(...opts.map(([q, label]) => {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'qopt'; b.textContent = label;
@@ -458,28 +458,28 @@ function renderOpts(opts) {
 f.addEventListener('submit', async e => {
   e.preventDefault();
   status.className = ''; status.textContent = '';
-  qtitle.textContent = 'Смотрю, какие есть варианты…';
+  qtitle.textContent = 'Checking available options…';
   qopts.replaceChildren();
   qpanel.hidden = false;
   btn.disabled = true;
   try {
     const r = await fetch('/probe?url=' + encodeURIComponent(url.value.trim()));
     const p = await r.json();
-    if (!r.ok) throw new Error(p.error || 'сервер вернул ошибку ' + r.status);
+    if (!r.ok) throw new Error(p.error || 'server returned error ' + r.status);
     if (mode === 'audio') {
-      // «Лучшее» = VBR по исходнику; пресеты предлагаем, только если дорожка их тянет
-      const opts = [['best', p.max_abr ? 'Лучшее · ~' + p.max_abr + ' kbps' : 'Лучшее']];
+      // Best uses source VBR; presets are shown only when the audio track supports them.
+      const opts = [['best', p.max_abr ? 'Best · ~' + p.max_abr + ' kbps' : 'Best']];
       for (const b of [192, 128]) if (!p.max_abr || b < p.max_abr) opts.push([String(b), b + ' kbps']);
       renderOpts(opts);
     } else {
       renderOpts(p.heights.length
-        ? p.heights.map((h, i) => [String(h), h + 'p' + (i === 0 ? ' · максимум' : '')])
+        ? p.heights.map((h, i) => [String(h), h + 'p' + (i === 0 ? ' · maximum' : '')])
         : FALLBACK);
     }
   } catch (err) {
     qpanel.hidden = true;
     status.className = 'err';
-    status.textContent = 'Не получилось: ' + err.message;
+    status.textContent = 'Could not continue: ' + err.message;
   } finally {
     btn.disabled = false;
   }
@@ -497,12 +497,12 @@ function addItem(label) {
   el.className = 'dl-item';
   el.innerHTML =
     '<div class="dl-row"><div class="dl-name"></div>' +
-    '<button type="button" class="dl-x" aria-label="Отменить и убрать">' +
+    '<button type="button" class="dl-x" aria-label="Cancel and remove">' +
     '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
     'stroke-width="2" stroke-linecap="round" aria-hidden="true">' +
     '<line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>' +
     '</button></div>' +
-    '<div class="dl-bar"><i></i></div><div class="dl-status">В очереди…</div>';
+    '<div class="dl-bar"><i></i></div><div class="dl-status">Queued…</div>';
   el.querySelector('.dl-name').textContent = label;
   dlList.prepend(el);
   dl.hidden = false;
@@ -521,19 +521,19 @@ async function download(quality) {
       body: JSON.stringify({url: u, mode, quality})
     });
     if (!res.ok) {
-      const {error} = await res.json().catch(() => ({error: 'сервер вернул ошибку ' + res.status}));
+      const {error} = await res.json().catch(() => ({error: 'server returned error ' + res.status}));
       throw new Error(error);
     }
     ({id} = await res.json());
   } catch (err) {
     status.className = 'err';
-    status.textContent = 'Не получилось: ' + err.message;
+    status.textContent = 'Could not continue: ' + err.message;
     return;
   }
   url.value = '';
   let label = u;
   try { label = new URL(u).hostname.replace('www.', ''); } catch {}
-  const item = addItem(label + (mode === 'audio' ? ' — звук' : ' — видео'));
+  const item = addItem(label + (mode === 'audio' ? ' — audio' : ' — video'));
   const nameEl = item.querySelector('.dl-name'), barEl = item.querySelector('.dl-bar i'),
         stEl = item.querySelector('.dl-status');
   let cancelled = false;
@@ -551,9 +551,9 @@ async function download(quality) {
       if (p.error) throw new Error(p.error);
       if (p.name) nameEl.textContent = p.name;
       barEl.style.width = p.pct + '%';
-      stEl.textContent = p.phase === 'queued' ? 'В очереди…'
-        : p.phase === 'processing' ? 'Обрабатываю…'
-        : 'Скачиваю… ' + Math.round(p.pct) + '%';
+      stEl.textContent = p.phase === 'queued' ? 'Queued…'
+        : p.phase === 'processing' ? 'Processing…'
+        : 'Downloading… ' + Math.round(p.pct) + '%';
       if (p.done) break;
     }
     if (cancelled) return;
@@ -563,7 +563,7 @@ async function download(quality) {
     document.body.appendChild(a); a.click(); a.remove();
     item.classList.add('done');
     barEl.style.width = '100%';
-    stEl.textContent = 'Готово — файл в «Загрузках»';
+    stEl.textContent = 'Done — file saved to Downloads';
   } catch (err) {
     if (cancelled) return;
     item.classList.add('err');
@@ -600,14 +600,14 @@ def _run_job(job, cmd):
                         job["name"] = re.sub(r"\.f\d+$", "", Path(m.group(1).strip()).stem)
                 if time.monotonic() > deadline:
                     p.kill()
-                    job["error"] = "скачивание не уложилось в 30 минут"
+                    job["error"] = "download did not finish within 30 minutes"
                     return
             p.wait()
             files = [f for f in Path(job["tmp"].name).iterdir()
                      if f.is_file() and f.suffix != ".part"]
             if p.returncode != 0 or not files:
                 err = next((l for l in reversed(tail) if l.startswith("ERROR")), None)
-                job["error"] = (err or (tail[-1] if tail else "yt-dlp не справился")).removeprefix("ERROR: ")
+                job["error"] = (err or (tail[-1] if tail else "yt-dlp could not process this video")).removeprefix("ERROR: ")
                 return
             job["file"] = max(files, key=lambda f: f.stat().st_size)
             job["name"] = job["file"].stem
@@ -632,14 +632,14 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/progress":
             job = JOBS.get(urllib.parse.parse_qs(query).get("id", [""])[0])
             if not job:
-                self._json(404, {"error": "задача не найдена"})
+                self._json(404, {"error": "job not found"})
                 return
             self._json(200, {"pct": job["pct"], "phase": job["phase"], "name": job["name"],
                              "done": job["file"] is not None, "error": job["error"]})
         elif path == "/probe":
             u = urllib.parse.parse_qs(query).get("url", [""])[0]
             if not u.startswith(("http://", "https://")):
-                self._json(400, {"error": "нужна ссылка, начинающаяся с http:// или https://"})
+                self._json(400, {"error": "a link starting with http:// or https:// is required"})
                 return
             try:
                 anilibria = _anilibria_episode(u)
@@ -655,11 +655,11 @@ class Handler(BaseHTTPRequestHandler):
                 run = subprocess.run(["yt-dlp", "-J", "--no-playlist", u],
                                      capture_output=True, text=True, timeout=60)
             except subprocess.TimeoutExpired:
-                self._json(422, {"error": "сайт не ответил за минуту"})
+                self._json(422, {"error": "the site did not respond within one minute"})
                 return
             if run.returncode != 0:
                 lines = [l for l in run.stderr.strip().splitlines() if l]
-                msg = (lines[-1] if lines else "не удалось прочитать ролик").removeprefix("ERROR: ")
+                msg = (lines[-1] if lines else "could not read the video").removeprefix("ERROR: ")
                 self._json(422, {"error": msg})
                 return
             info = json.loads(run.stdout)
@@ -677,7 +677,7 @@ class Handler(BaseHTTPRequestHandler):
                 job["cancelled"] = True
                 if job["proc"]:
                     job["proc"].kill()
-                elif job["file"]:  # уже докачано, но не забрано — просто прибрать
+                elif job["file"]:  # The file is already complete but has not been retrieved.
                     job["tmp"].cleanup()
             self._json(200, {"ok": True})
         elif path == "/file":
@@ -711,7 +711,7 @@ class Handler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, AttributeError):
             data, url = {}, ""
         if not url.startswith(("http://", "https://")):
-            self._json(400, {"error": "нужна ссылка, начинающаяся с http:// или https://"})
+            self._json(400, {"error": "a link starting with http:// or https:// is required"})
             return
 
         try:
@@ -728,29 +728,29 @@ class Handler(BaseHTTPRequestHandler):
         out = (str(Path(tmp.name) / (_safe_title(anilibria["title"]) + ".%(ext)s"))
                if anilibria else str(Path(tmp.name) / "%(title).150B.%(ext)s"))
         if data.get("mode") == "audio":
-            # без ffmpeg mp3 не сконвертировать — отдаём звук в исходном формате (m4a/webm)
-            bitrate = {"192": "192K", "128": "128K"}.get(quality, "0")  # 0 = лучший VBR
+            # Without ffmpeg, MP3 conversion is unavailable, so use the source audio format.
+            bitrate = {"192": "192K", "128": "128K"}.get(quality, "0")  # 0 = best VBR
             cmd = (["yt-dlp", "--no-playlist", "-x", "--audio-format", "mp3",
                     "--audio-quality", bitrate, "-o", out, source_url]
                    if ffmpeg else
                    ["yt-dlp", "--no-playlist", "-f", "ba", "-o", out, source_url])
         else:
             if anilibria:
-                # Ссылка уже ведёт на плейлист одного качества; у HLS нет отдельных
-                # форматов yt-dlp, поэтому выбирать через -f здесь нельзя.
+                # The link already points to one quality playlist. HLS has no separate
+                # yt-dlp formats here, so quality cannot be selected through -f.
                 cmd = ["yt-dlp", "--no-playlist", "-o", out, source_url]
                 if ffmpeg:
                     cmd += ["--merge-output-format", "mp4"]
             elif ffmpeg:
-                # качество приходит реальной высотой из /probe (или из запасного списка)
+                # Quality is the real height from /probe, or a fallback value.
                 fmt = f"bv*[height<={h}]+ba/b[height<={h}]/b" if h else "bv*+ba/b"
                 cmd = ["yt-dlp", "--no-playlist", "-f", fmt, "-o", out, url,
                        "--merge-output-format", "mp4"]
             else:
-                # без ffmpeg yt-dlp не может склеить видео+звук — берём лучший готовый файл (YouTube ≤720p)
+                # Without ffmpeg, yt-dlp cannot merge video and audio; use the best ready-made file.
                 fmt = f"b[height<={h}]/b" if h else "b"
                 cmd = ["yt-dlp", "--no-playlist", "-f", fmt, "-o", out, url]
-        cmd.insert(1, "--newline")  # прогресс отдельными строками, чтобы их можно было читать на лету
+        cmd.insert(1, "--newline")  # Print progress on separate lines for live updates.
         job_id = uuid.uuid4().hex[:12]
         job = {"pct": 0.0, "phase": "queued", "name": "", "file": None, "error": None,
                "tmp": tmp, "proc": None, "cancelled": False}
@@ -774,7 +774,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if not ensure_dependencies():
         raise SystemExit(1)
-    ytdlp = "есть" if shutil.which("yt-dlp") else "нет"
-    ff = "есть" if shutil.which("ffmpeg") else "нет (YouTube будет максимум 720p, аудио без mp3)"
-    print(f"VideoGrab запущен: http://localhost:{PORT}   yt-dlp: {ytdlp}   ffmpeg: {ff}")
+    ytdlp = "available" if shutil.which("yt-dlp") else "missing"
+    ff = "available" if shutil.which("ffmpeg") else "missing"
+    print(f"VideoGrab started: http://localhost:{PORT}   yt-dlp: {ytdlp}   ffmpeg: {ff}")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
