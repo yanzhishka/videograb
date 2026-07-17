@@ -15,6 +15,12 @@ Posts containing one video or photo are downloaded as a regular media file. Post
 
 Private posts and Telegram Stories require an authenticated Telegram session. Telegram does not expose their media on the public link page, so they are not available in the current public-only mode.
 
+## YummyAnime links
+
+Paste a title page from `old.yummyani.me/catalog/item/`. VideoGrab loads the available episodes and shows separate selectors for the episode, voice or subtitles, player, and quality.
+
+The **Automatic** player option tries the available supported players in this order: CVH, Aksor, and Sibnet. You can also select one of these players manually. Only combinations backed by a supported downloadable player are shown.
+
 ## Start on macOS
 
 1. Open **Terminal**: press `Cmd + Space`, type `Terminal`, then press `Enter`.

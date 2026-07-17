@@ -39,6 +39,14 @@ ANILIBRIA_HOSTS = {"anilibria.top", "www.anilibria.top", "aniliberty.top", "www.
 ANILIBRIA_EPISODE_PATH = re.compile(r"^/anime/video/episode/([0-9a-f-]+)$", re.IGNORECASE)
 TELEGRAM_HOSTS = {"t.me", "www.t.me", "telegram.me", "www.telegram.me",
                   "telegram.dog", "www.telegram.dog"}
+YUMMY_HOSTS = {"old.yummyani.me"}
+YUMMY_PLAYERS = {"CVH", "Aksor", "Sibnet"}
+YUMMY_PLAYER_PRIORITY = {"CVH": 0, "Aksor": 1, "Sibnet": 2}
+YUMMY_CACHE = {}
+YUMMY_PLAYER_LABEL = "\u041f\u043b\u0435\u0435\u0440"
+YUMMY_SUBTITLES_LABEL = "\u0421\u0443\u0431\u0442\u0438\u0442\u0440\u044b"
+YUMMY_VOICE_LABEL = "\u041e\u0437\u0432\u0443\u0447\u043a\u0430"
+YUMMY_WATCH_LABEL = "\u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c"
 NUXT_DATA = re.compile(
     r'<script[^>]+id=["\']__NUXT_DATA__["\'][^>]*>(.*?)</script>', re.DOTALL
 )
@@ -120,6 +128,214 @@ def _pick_anilibria_source(sources, requested_height=None):
         return sources[requested_height]
     eligible = [height for height in sources if requested_height is None or height <= requested_height]
     return sources[max(eligible)] if eligible else sources[min(sources)]
+
+
+def _read_json(url, referer=None):
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    if referer:
+        headers["Referer"] = referer
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+            return json.load(response)
+    except Exception as exc:
+        raise SourceError(f"Could not read player data: {exc}") from exc
+
+
+def _meta_content(page, name):
+    for tag in re.findall(r"<meta\b[^>]*>", page, re.IGNORECASE):
+        if not re.search(rf'\b(?:id|name)=["\']{re.escape(name)}["\']', tag, re.IGNORECASE):
+            continue
+        match = re.search(r'\bcontent=["\']([^"\']*)["\']', tag, re.IGNORECASE)
+        if match:
+            return html.unescape(match.group(1))
+    return None
+
+
+def _yummy_player_name(value):
+    prefix = rf"^(?:{YUMMY_PLAYER_LABEL}|Player)\s+"
+    return re.sub(prefix, "", str(value or ""), flags=re.IGNORECASE).strip()
+
+
+def _yummy_voice_name(value):
+    value = str(value or "").strip()
+    subtitles = re.match(rf"^(?:{YUMMY_SUBTITLES_LABEL}|Subtitles)\s*(.*)$",
+                         value, re.IGNORECASE)
+    if subtitles:
+        suffix = subtitles.group(1).strip()
+        return "Subtitles" + (f" — {suffix}" if suffix else "")
+    prefix = rf"^(?:{YUMMY_VOICE_LABEL}|Voice)\s+"
+    return re.sub(prefix, "", value, flags=re.IGNORECASE).strip() or "Original"
+
+
+def _natural_key(value):
+    return [int(part) if part.isdigit() else part.casefold()
+            for part in re.split(r"(\d+)", str(value))]
+
+
+def _yummy_catalog(url):
+    """Return downloadable episode, voice, and player combinations from YummyAnime."""
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.hostname or "").lower() not in YUMMY_HOSTS:
+        return None
+    if not parsed.path.startswith("/catalog/item/"):
+        raise SourceError("Paste a YummyAnime title page from /catalog/item/")
+
+    cache_key = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    cached = YUMMY_CACHE.get(cache_key)
+    if cached and time.monotonic() - cached[0] < 600:
+        return cached[1]
+
+    request = urllib.request.Request(
+        cache_key,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 Chrome/126 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            page = response.read().decode(response.headers.get_content_charset() or "utf-8", errors="replace")
+    except Exception as exc:
+        raise SourceError(f"Could not open the YummyAnime page: {exc}") from exc
+
+    page_id = _meta_content(page, "page_id")
+    if not page_id or not page_id.isdigit():
+        raise SourceError("YummyAnime did not provide a title ID; the page may have changed")
+    payload = _read_json(f"https://old.yummyani.me/api/anime/{page_id}/videos", cache_key)
+    raw_items = payload.get("response", []) if isinstance(payload, dict) else []
+
+    deduplicated = {}
+    for raw in raw_items:
+        data = raw.get("data", {}) if isinstance(raw, dict) else {}
+        player = _yummy_player_name(data.get("player"))
+        iframe_url = raw.get("iframe_url") if isinstance(raw, dict) else None
+        if player not in YUMMY_PLAYERS or not isinstance(iframe_url, str):
+            continue
+        item = {
+            "id": str(raw.get("video_id", "")),
+            "episode": str(raw.get("number", "")).strip(),
+            "voice": _yummy_voice_name(data.get("dubbing")),
+            "player": player,
+            "iframe_url": urllib.parse.urljoin(cache_key, iframe_url),
+            "date": int(raw.get("date") or 0),
+        }
+        if not item["id"] or not item["episode"]:
+            continue
+        key = (item["episode"], item["voice"], item["player"])
+        if key not in deduplicated or item["date"] > deduplicated[key]["date"]:
+            deduplicated[key] = item
+
+    items = sorted(
+        deduplicated.values(),
+        key=lambda item: (_natural_key(item["episode"]), item["voice"].casefold(),
+                          YUMMY_PLAYER_PRIORITY[item["player"]]),
+    )
+    if not items:
+        raise SourceError("No supported YummyAnime players were found for this title")
+
+    title_match = re.search(r"<title>(.*?)</title>", page, re.IGNORECASE | re.DOTALL)
+    title = html.unescape(re.sub(r"\s+", " ", title_match.group(1))).strip() if title_match else "YummyAnime"
+    title_suffix = r"\s+[—-]\s+" + re.escape(YUMMY_WATCH_LABEL) + r".*$"
+    title = re.sub(title_suffix, "", title, flags=re.IGNORECASE).strip()
+    result = {"title": title, "items": items, "url": cache_key}
+    YUMMY_CACHE[cache_key] = (time.monotonic(), result)
+    if len(YUMMY_CACHE) > 16:
+        oldest = min(YUMMY_CACHE, key=lambda key: YUMMY_CACHE[key][0])
+        YUMMY_CACHE.pop(oldest, None)
+    return result
+
+
+def _pick_height(sources, requested_height=None):
+    available = {height: url for height, url in sources.items() if url}
+    if not available:
+        raise SourceError("The selected player did not provide a downloadable stream")
+    eligible = [height for height in available if requested_height is None or height <= requested_height]
+    height = max(eligible) if eligible else min(available)
+    return available[height]
+
+
+def _resolve_yummy_cvh(item, requested_height):
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(item["iframe_url"]).query)
+    title_id = query.get("anime_id", [""])[0]
+    episode = query.get("episode", [item["episode"]])[0]
+    voice = query.get("dubbing_code", [""])[0]
+    if not title_id.isdigit():
+        raise SourceError("CVH did not provide a valid title ID")
+    playlist_url = "https://plapi.cdnvideohub.com/api/v1/player/sv/playlist?" + urllib.parse.urlencode({
+        "pub": "745", "id": title_id, "aggr": "mali",
+    })
+    playlist = _read_json(playlist_url, item["iframe_url"])
+    candidates = [entry for entry in playlist.get("items", [])
+                  if str(entry.get("episode", "")) == str(episode)]
+    if voice:
+        candidates = [entry for entry in candidates
+                      if str(entry.get("voiceStudio", "")).casefold() == voice.casefold()]
+    if not candidates:
+        raise SourceError("CVH did not provide the selected episode and voice")
+    video_id = str(candidates[0].get("vkId", ""))
+    if not video_id.isdigit():
+        raise SourceError("CVH did not provide a valid video ID")
+    video = _read_json(f"https://plapi.cdnvideohub.com/api/v1/player/sv/video/{video_id}",
+                       item["iframe_url"])
+    sources = video.get("sources", {})
+    by_height = {
+        2160: sources.get("mpeg4kUrl"),
+        1440: sources.get("mpeg2kUrl") or sources.get("mpegQhdUrl"),
+        1080: sources.get("mpegFullHdUrl"),
+        720: sources.get("mpegHighUrl"),
+        480: sources.get("mpegMediumUrl"),
+        360: sources.get("mpegLowUrl"),
+        240: sources.get("mpegLowestUrl"),
+        144: sources.get("mpegTinyUrl"),
+    }
+    return _pick_height(by_height, requested_height), "https://ru.yummyani.me/"
+
+
+def _resolve_yummy_aksor(item, requested_height):
+    match = re.search(r"/video/([a-f0-9]+)", urllib.parse.urlsplit(item["iframe_url"]).path,
+                      re.IGNORECASE)
+    if not match:
+        raise SourceError("Aksor did not provide a valid video ID")
+    data = _read_json(f"https://player.aksor.tv/api/video/{match.group(1)}", item["iframe_url"])
+    qualities = data.get("qualities", {})
+    by_height = {
+        2160: qualities.get("q4k"), 1440: qualities.get("q2k"),
+        1080: qualities.get("q1080"), 720: qualities.get("q720"),
+        480: qualities.get("q480"), 360: qualities.get("q360"),
+    }
+    return _pick_height(by_height, requested_height), "https://player.aksor.tv/"
+
+
+def _select_yummy_source(catalog, selection, requested_height):
+    if not isinstance(selection, dict):
+        raise SourceError("Choose an episode, voice, and player")
+    episode = str(selection.get("episode", ""))
+    voice = str(selection.get("voice", ""))
+    player = str(selection.get("player", "auto"))
+    candidates = [item for item in catalog["items"]
+                  if item["episode"] == episode and item["voice"] == voice]
+    if player != "auto":
+        candidates = [item for item in candidates if item["player"] == player]
+    candidates.sort(key=lambda item: YUMMY_PLAYER_PRIORITY[item["player"]])
+    if not candidates:
+        raise SourceError("The selected YummyAnime combination is no longer available")
+
+    errors = []
+    for item in candidates:
+        try:
+            if item["player"] == "CVH":
+                source_url, referer = _resolve_yummy_cvh(item, requested_height)
+            elif item["player"] == "Aksor":
+                source_url, referer = _resolve_yummy_aksor(item, requested_height)
+            else:
+                source_url, referer = item["iframe_url"], catalog["url"]
+            title = f'{catalog["title"]} - Episode {episode} - {voice} ({item["player"]})'
+            return {"url": source_url, "referer": referer, "title": title,
+                    "player": item["player"]}
+        except SourceError as exc:
+            errors.append(f'{item["player"]}: {exc}')
+    raise SourceError("No selected player could provide the video. " + "; ".join(errors))
 
 
 def _safe_filename(title):
@@ -504,10 +720,16 @@ INDEX = """<!doctype html>
   .ghost:hover{color:var(--fg)}
   .ghost:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
   [hidden]{display:none !important}
-  #qpanel{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;
+  #qpanel{display:flex;align-items:stretch;gap:.65rem;flex-direction:column;
           background:var(--panel);border:1px solid var(--border);border-radius:1.4rem;
           padding:.6rem .9rem;animation:pop .18s ease-out}
   .qtitle{color:var(--muted);font-size:.85rem}
+  #sourceopts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.55rem}
+  .source-field{display:flex;flex-direction:column;gap:.25rem;color:var(--muted);font-size:.75rem}
+  .source-field select{width:100%;min-width:0;min-height:42px;padding:0 .7rem;
+        font:inherit;font-size:.85rem;color:var(--fg);background:var(--bg);
+        border:1px solid var(--border);border-radius:.65rem;outline:none}
+  .source-field select:focus{border-color:var(--lime);box-shadow:0 0 0 2px rgba(163,230,53,.12)}
   #qopts{display:flex;gap:.4rem;flex-wrap:wrap}
   .qopt{min-height:40px;padding:0 1rem;font:inherit;font-weight:500;color:var(--fg);
         background:none;border:1px solid var(--border);border-radius:999px;cursor:pointer;
@@ -516,6 +738,7 @@ INDEX = """<!doctype html>
   .qopt:focus-visible{outline:2px solid var(--lime);outline-offset:2px}
   @keyframes pop{from{opacity:0;translate:0 -4px}}
   @media (prefers-reduced-motion:reduce){#qpanel{animation:none}}
+  @media (max-width:520px){#sourceopts{grid-template-columns:1fr}}
   #dl{position:fixed;top:14px;right:14px;width:min(330px,calc(100vw - 28px));z-index:50;
       background:var(--panel);border:1px solid var(--border);border-radius:16px;
       box-shadow:0 12px 40px rgba(0,0,0,.55);padding:.8rem .95rem;
@@ -574,6 +797,7 @@ INDEX = """<!doctype html>
 
     <div id="qpanel" hidden>
       <span class="qtitle" id="qtitle">Quality:</span>
+      <div id="sourceopts" hidden></div>
       <div id="qopts" role="group" aria-label="Choose quality"></div>
     </div>
 
@@ -615,7 +839,7 @@ INDEX = """<!doctype html>
     <div id="dl-list"></div>
   </div>
 
-  <p class="sites">YouTube &middot; Telegram &middot; VK Video &middot; TikTok &middot; Instagram &middot; X &middot;
+  <p class="sites">YouTube &middot; Telegram &middot; YummyAnime &middot; VK Video &middot; TikTok &middot; Instagram &middot; X &middot;
      Rutube &middot; Twitch &middot; Pornhub &middot; and 1,800+ more</p>
 
   <footer>Runs locally — your links are not sent anywhere. The file is saved to Downloads.</footer>
@@ -624,7 +848,7 @@ INDEX = """<!doctype html>
 const f = document.getElementById('f'), btn = document.getElementById('btn'),
       status = document.getElementById('status'), url = document.getElementById('url'),
       qpanel = document.getElementById('qpanel'), qopts = document.getElementById('qopts'),
-      qtitle = document.getElementById('qtitle');
+      qtitle = document.getElementById('qtitle'), sourceopts = document.getElementById('sourceopts');
 let mode = 'video';
 
 // Fallback list when the site does not provide its available formats.
@@ -647,16 +871,63 @@ document.getElementById('paste').addEventListener('click', async () => {
   }
 });
 
-function renderOpts(opts) {
-  qtitle.textContent = 'Quality:';
+function renderOpts(opts, selection = null, keepSources = false, title = 'Quality:') {
+  qtitle.textContent = title;
+  if (!keepSources) sourceopts.hidden = true;
   qopts.replaceChildren(...opts.map(([q, label]) => {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'qopt'; b.textContent = label;
-    b.addEventListener('click', () => download(q));
+    b.addEventListener('click', () => download(q, selection ? selection() : null));
     return b;
   }));
   qpanel.hidden = false;
-  qopts.firstChild.focus();
+  (keepSources ? sourceopts.querySelector('select') : qopts.firstChild).focus();
+}
+
+function renderYummy(sources) {
+  const makeField = (name, label) => {
+    const field = document.createElement('label');
+    field.className = 'source-field'; field.textContent = label;
+    const select = document.createElement('select');
+    select.name = name; field.appendChild(select); sourceopts.appendChild(field);
+    return select;
+  };
+  const unique = values => [...new Set(values)];
+  const fill = (select, values) => {
+    const previous = select.value;
+    select.replaceChildren(...values.map(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value; option.textContent = label; return option;
+    }));
+    if ([...select.options].some(option => option.value === previous)) select.value = previous;
+  };
+
+  sourceopts.replaceChildren(); sourceopts.hidden = false;
+  const episode = makeField('episode', 'Episode');
+  const voice = makeField('voice', 'Voice / subtitles');
+  const player = makeField('player', 'Player');
+  fill(episode, unique(sources.map(source => source.episode)).map(value => [value, 'Episode ' + value]));
+
+  const updatePlayers = () => {
+    const players = unique(sources.filter(source => source.episode === episode.value &&
+      source.voice === voice.value).map(source => source.player));
+    fill(player, [['auto', 'Automatic (recommended)'], ...players.map(value => [value, value])]);
+  };
+  const updateVoices = () => {
+    const voices = unique(sources.filter(source => source.episode === episode.value)
+      .map(source => source.voice));
+    fill(voice, voices.map(value => [value, value]));
+    updatePlayers();
+  };
+  episode.addEventListener('change', updateVoices);
+  voice.addEventListener('change', updatePlayers);
+  updateVoices();
+
+  const selection = () => ({episode: episode.value, voice: voice.value, player: player.value});
+  const opts = mode === 'audio'
+    ? [['best', 'Best audio'], ['192', '192 kbps'], ['128', '128 kbps']]
+    : FALLBACK;
+  renderOpts(opts, selection, true, 'Choose the episode, voice, player, and quality:');
 }
 
 f.addEventListener('submit', async e => {
@@ -670,7 +941,9 @@ f.addEventListener('submit', async e => {
     const r = await fetch('/probe?url=' + encodeURIComponent(url.value.trim()));
     const p = await r.json();
     if (!r.ok) throw new Error(p.error || 'server returned error ' + r.status);
-    if (mode === 'audio') {
+    if (p.yummy_sources) {
+      renderYummy(p.yummy_sources);
+    } else if (mode === 'audio') {
       // Best uses source VBR; presets are shown only when the audio track supports them.
       const opts = [['best', p.max_abr ? 'Best · ~' + p.max_abr + ' kbps' : 'Best']];
       for (const b of [192, 128]) if (!p.max_abr || b < p.max_abr) opts.push([String(b), b + ' kbps']);
@@ -715,7 +988,7 @@ function addItem(label) {
   return el;
 }
 
-async function download(quality) {
+async function download(quality, yummy = null) {
   qpanel.hidden = true;
   status.className = ''; status.textContent = '';
   const u = url.value.trim();
@@ -724,7 +997,7 @@ async function download(quality) {
     const res = await fetch('/download', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({url: u, mode, quality})
+      body: JSON.stringify({url: u, mode, quality, ...(yummy ? {yummy} : {})})
     });
     if (!res.ok) {
       const {error} = await res.json().catch(() => ({error: 'server returned error ' + res.status}));
@@ -850,6 +1123,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 telegram = _telegram_post(u)
                 anilibria = _anilibria_episode(u)
+                yummy = _yummy_catalog(u)
             except SourceError as exc:
                 self._json(422, {"error": str(exc)})
                 return
@@ -861,6 +1135,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"title": anilibria["title"],
                                  "heights": sorted(anilibria["sources"], reverse=True),
                                  "max_abr": None})
+                return
+            if yummy:
+                sources = [{key: item[key] for key in ("episode", "voice", "player")}
+                           for item in yummy["items"]]
+                self._json(200, {"title": yummy["title"], "heights": [],
+                                 "max_abr": None, "yummy_sources": sources})
                 return
             try:
                 run = subprocess.run(["yt-dlp", "-J", "--no-playlist", u],
@@ -928,6 +1208,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             telegram = _telegram_post(url)
             anilibria = _anilibria_episode(url)
+            yummy = _yummy_catalog(url)
         except SourceError as exc:
             self._json(422, {"error": str(exc)})
             return
@@ -949,6 +1230,16 @@ class Handler(BaseHTTPRequestHandler):
         ffmpeg = shutil.which("ffmpeg")
         quality = str(data.get("quality", ""))
         h = int(quality) if quality.isdigit() and 100 <= int(quality) <= 8640 else None
+        yummy_source = None
+        if yummy:
+            try:
+                yummy_source = _select_yummy_source(
+                    yummy, data.get("yummy"), h if data.get("mode") != "audio" else None
+                )
+            except SourceError as exc:
+                tmp.cleanup()
+                self._json(422, {"error": str(exc)})
+                return
         if telegram:
             playable = next((item for item in telegram["media"] if item["kind"] in {"video", "audio"}), None)
             if not playable:
@@ -957,6 +1248,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             source_url = playable["url"]
             out = str(Path(tmp.name) / (_safe_title(telegram["title"]) + ".%(ext)s"))
+        elif yummy_source:
+            source_url = yummy_source["url"]
+            out = str(Path(tmp.name) / (_safe_title(yummy_source["title"]) + ".%(ext)s"))
         else:
             source_url = _pick_anilibria_source(anilibria["sources"], h) if anilibria else url
             out = (str(Path(tmp.name) / (_safe_title(anilibria["title"]) + ".%(ext)s"))
@@ -970,8 +1264,12 @@ class Handler(BaseHTTPRequestHandler):
                    ["yt-dlp", "--no-playlist", "-f", "ba", "-o", out, source_url])
         else:
             if anilibria:
-                # The link already points to one quality playlist. HLS has no separate
-                # yt-dlp formats here, so quality cannot be selected through -f.
+                # AniLiberty already points to the selected quality playlist.
+                cmd = ["yt-dlp", "--no-playlist", "-o", out, source_url]
+                if ffmpeg:
+                    cmd += ["--merge-output-format", "mp4"]
+            elif yummy_source:
+                # The YummyAnime resolver already selected the requested quality.
                 cmd = ["yt-dlp", "--no-playlist", "-o", out, source_url]
                 if ffmpeg:
                     cmd += ["--merge-output-format", "mp4"]
@@ -986,6 +1284,9 @@ class Handler(BaseHTTPRequestHandler):
                 cmd = ["yt-dlp", "--no-playlist", "-f", fmt, "-o", out, url]
         if telegram:
             cmd[1:1] = ["--add-header", f"Referer:{telegram['embed_url']}"]
+        elif yummy_source:
+            cmd[1:1] = ["--referer", yummy_source["referer"],
+                        "--user-agent", "Mozilla/5.0"]
         cmd.insert(1, "--newline")  # Print progress on separate lines for live updates.
         job_id = uuid.uuid4().hex[:12]
         job = {"pct": 0.0, "phase": "queued", "name": "", "file": None, "error": None,
