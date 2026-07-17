@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """VideoGrab downloads video from YouTube, VK, TikTok, and ~1,800 other sites with yt-dlp.
 
-Run:  python3 app.py  →  open http://localhost:8742
+Run:  python3 videograb.py  →  open http://localhost:8742
 """
 import collections
 import html
